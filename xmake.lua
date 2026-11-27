@@ -16,7 +16,8 @@ local qt_prefix = get_config("qt") or os.getenv("PANO_QT_PREFIX")
 target("pano-reader")
     add_files("src/**.cpp")
     add_files("src/**.h")
-    add_frameworks("QtWidgets", "QtPdf")
+    add_files("resources/resources.qrc")
+    add_frameworks("QtWidgets", "QtPdf", "QtSvg")
     add_includedirs("src")
     set_encodings("utf-8")
     if qt_prefix then
@@ -54,6 +55,16 @@ target("pano-library-probe")
     end
 
 
+target("pano-text-geometry-probe")
+    set_kind("binary")
+    add_files("tools/text_geometry_probe.cpp")
+    add_files("src/annotation/TextSelectionGeometry.cpp")
+    add_frameworks("QtGui")
+    add_includedirs("src")
+    if qt_prefix then
+        add_rpathdirs(path.join(qt_prefix, "lib"))
+    end
+
 target("pano-theme-probe")
     set_kind("binary")
     add_files("tools/theme_probe.cpp")
@@ -75,7 +86,8 @@ target("pano-theme-probe")
     add_files("src/note/*.h")
     add_files("src/settings/*.h")
     add_files("src/storage/*.h")
-    add_frameworks("QtWidgets", "QtPdf")
+    add_frameworks("QtWidgets", "QtPdf", "QtSvg")
+    add_files("resources/resources.qrc")
     add_includedirs("src")
     add_defines("PANO_SAMPLE_PDF=\"$(projectdir)/examples/sample-paper.pdf\"")
     if qt_prefix then
@@ -103,7 +115,8 @@ target("pano-phase1-probe")
     add_files("src/note/*.h")
     add_files("src/settings/*.h")
     add_files("src/storage/*.h")
-    add_frameworks("QtWidgets", "QtPdf")
+    add_frameworks("QtWidgets", "QtPdf", "QtSvg")
+    add_files("resources/resources.qrc")
     add_includedirs("src")
     add_defines("PANO_SAMPLE_PDF=\"$(projectdir)/examples/sample-paper.pdf\"")
     if qt_prefix then

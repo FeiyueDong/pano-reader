@@ -203,7 +203,7 @@
   "books": {
     "0e9b4d3a-6f6f-4c86-9d5c-1f0b2f46f1a1": {
       "page_index": 1,
-      "page_point": [0, 0],
+      "page_point": [297.64, 421.13],
       "zoom": 1.5,
       "zoom_mode": "fixed",
       "rotation": 90,
@@ -214,7 +214,11 @@
 ```
 
 `zoom_mode` 为 `fixed`、`fit_width` 或 `fit_page`；`rotation` 只能为
-0/90/180/270。无状态或状态无效时回到第一页、固定比例。
+0/90/180/270。`page_point` 是可选的阅读锚点，单位为**未旋转页面 pt**，表示打开时
+视口中心所在的页面位置；省略或无效时回退到 `page_index` 的页首，兼容 Phase 1 旧
+数据。无状态或状态无效时回到第一页、固定比例。
+
+页面切换、缩放、旋转和同页滚动会更新阅读状态；滚动只更新阅读状态，不重写标注文件。
 
 `state/history.json` 保存每本书最近一次阅读时间：
 
@@ -233,9 +237,11 @@
 本机配置不放进书库，避免随书库同步或分享：
 
 - `general.json`：`format: pano-settings-general`，包含主题键、界面字号、恢复上次书库、
-  恢复打开标签、自动保存秒数。
+  恢复打开标签、自动保存秒数、默认导入方式、书库封面/列表视图。
 - `workspace.json`：`format: pano-settings-workspace`，包含上次书库路径、上次书籍 ID、
-  打开书籍 ID 列表。
+  打开书籍 ID 列表、书库三栏和阅读器左右栏的宽度与可见性。
+- `tools.json`：`format: pano-tool-presets`，按工具保存新标注预设；不属于书库，不随
+  书库分享。字段与该工具的 `AnnotationStyle` 一致，缺省工具使用内置默认值。
 - `sources.json`：`format: pano-local-sources`，按书库 ID 保存映射模式书籍的本机源文件
   覆盖路径：
 
@@ -256,18 +262,49 @@
 覆盖路径只改变本机解析结果，不写回 `document.json`，因此共享书库时不会把本机绝对
 路径带给其他设备。
 
+工具预设示例：
+
+```json
+{
+  "format": "pano-tool-presets",
+  "schema_version": 1,
+  "presets": {
+    "pencil": {
+      "stroke_color": "#ff344054",
+      "stroke_width_pt": 1.5,
+      "fill_color": null,
+      "opacity": 1.0,
+      "blend_mode": "normal"
+    },
+    "highlighter": {
+      "stroke_color": "#cc45b9e6",
+      "stroke_width_pt": 12,
+      "fill_color": null,
+      "opacity": 0.8,
+      "blend_mode": "multiply"
+    }
+  }
+}
+```
+
+未知 `schema_version` 或损坏的 `tools.json` 只告警并保留原文件，不静默覆盖；缺失时
+使用内置默认值。
+
 ## 9. 完整性、锁与外部修改
 
 - 打开书库时校验 `library.json` 的 `format`、`schema_version`、书籍目录、书架父级与
   循环、重复 ID；错误必须拒绝打开，保留原文件不变。
 - 书库打开期间持有 `.pano.lock`；另一个实例打开同一书库必须失败并给出明确提示。
 - 书库 JSON 写入前比较打开时记录的哈希；外部修改或删除后拒绝写入，不覆盖外部内容。
+- `annotations.json` 额外记录打开时的 SHA-256；保存前若文件被外部修改，本次保存失败、
+  保留未保存状态，要求重新打开书籍，避免覆盖外部内容。
 - 源 PDF 始终只读；PANO 不修改源文件，也不把标注写回 PDF。
 - 删除书籍前必须确认；永久删除只删除书库内拷贝的书籍目录，映射模式的外部 PDF 保留。
 - 旧 Demo 的 `.pano` 数据不会自动迁移；需要时由用户显式处理。
 
 ## 10. 兼容性与阶段边界
 
-- Phase 1 只实现上述格式；未知字段在读取时忽略，未知 `format`/`schema_version` 拒绝。
+- Phase 1.1 沿用上述格式并增加可选的阅读锚点与本机工具预设；未知字段在读取时忽略，
+  未知 `format`/`schema_version` 拒绝。
 - 标注文本选区限制在单页；不支持跨页选择、扫描 PDF OCR、PDF 导出。
 - 公式渲染采用本地子集实现；不支持的 TeX 命令以源码或安全占位显示。

@@ -3,8 +3,9 @@
 PANO 是一款本地优先的 PDF 阅读与标注工作区。它把 PDF 视为只读源文件，在独立的书库
 目录中保存标注、阅读状态和 Markdown 笔记；不依赖账号、云端或网络。
 
-当前版本是 Phase 1 正式应用基础，包含书库管理、多标签阅读、标注/笔记、主题和本机
-配置。Phase 0 的 Demo 已归档到 [`demo/`](demo/)，根工程不再依赖 Demo 代码。
+当前版本是 Phase 1.1 界面与交互稳定化版本，包含书库管理、多标签阅读、图标工具栏、
+标注/笔记、工具预设、主题和本机配置。Phase 0 的 Demo 已归档到 [`demo/`](demo/)，根
+工程不再依赖 Demo 代码。
 
 ![书库界面](docs/development/log/phase1-library.png)
 
@@ -16,9 +17,17 @@ PANO 是一款本地优先的 PDF 阅读与标注工作区。它把 PDF 视为�
   封面生成。
 - 组织：多级书架、收藏、回收站软删除/恢复/永久删除、搜索与排序。
 - 阅读：连续分页、页码跳转、固定比例/适合宽度/适合页面缩放、0/90/180/270 旋转。
-- 标注：文字高亮/下划线/删除线，直线、矩形、椭圆、铅笔、荧光笔、对象橡皮。
-- 笔记：标注附带的 Markdown 笔记，支持图片、区域截图、行内/独立公式的本地渲染。
-- 工作区：书库标签页 + 可关闭的阅读标签页；每个标签独立保存阅读状态和撤销历史。
+- 标注：文字高亮/下划线/删除线，直线、矩形、椭圆、铅笔、荧光笔、对象橡皮；文字选区按
+  行合并，减少词间空隙。
+- 阅读界面：两行图标工具栏（主工具 + 当前工具/对象属性）、目录/页面缩略图/标注左侧栏、
+  笔记/详情右侧栏；工具和属性可直接编辑。
+- 笔记：标注附带的 Markdown 笔记，支持图片、区域截图、行内/独立公式的本地渲染；编辑
+  时 2 秒空闲自动保存，30 秒最长等待。
+- 工具预设：每个工具独立保存颜色、线宽、透明度、混合模式；新建标注不受其他工具或
+  旧标注影响。
+- 书库：三栏浏览、封面/列表切换、面包屑、直接子书架书籍、拖拽加入书架/收藏/回收站。
+- 工作区：书库标签页 + 可关闭的阅读标签页；每个标签独立保存阅读状态、阅读锚点和撤销
+  历史。
 - 可靠性：`QSaveFile` 原子写入、书库单实例锁、外部修改检测、源 PDF 哈希校验。
 - 外观：四套主题（现代浅色、经典、暖色、现代深色），界面字体与标注默认样式可调。
 
@@ -31,7 +40,7 @@ PANO 是一款本地优先的 PDF 阅读与标注工作区。它把 PDF 视为�
 ## 环境
 
 - C++20 编译器（在 Arch Linux / GCC 16 上验证）
-- Qt 6.6 或更新的 Qt Widgets、Qt PDF
+- Qt 6.6 或更新的 Qt Widgets、Qt PDF、Qt SVG（图标着色）
 - xmake 3.x
 - Linux 或 Windows 桌面环境；当前只在 Linux 上实际构建和运行
 
@@ -97,13 +106,15 @@ xmake -j4                                  # 全部目标
 ./build/linux/x86_64/debug/pano-library-probe
 ./build/linux/x86_64/debug/pano-phase1-probe examples/sample-paper.pdf build/probe/phase1-ui.png
 ./build/linux/x86_64/debug/pano-coordinate-probe
+./build/linux/x86_64/debug/pano-text-geometry-probe
 PANO_CONFIG_DIR=/tmp/pano-config QT_QPA_PLATFORM=offscreen \
   ./build/linux/x86_64/debug/pano-theme-probe
 ```
 
-探针覆盖数据安全、导入与哈希、书架不变量、标注/笔记持久化、阅读状态、四种旋转与
-滚动坐标变换、主题切换；不替代人工 GUI 验收。结果记录在
-[`docs/development/log/phase1-results.md`](docs/development/log/phase1-results.md)。
+探针覆盖数据安全、导入与哈希、书架不变量、标注/笔记持久化、外部修改保护、阅读状态、
+四种旋转与滚动坐标变换、文字选区合并、主题切换；不替代人工 GUI 验收。结果记录在
+[`docs/development/log/phase1.1-results.md`](docs/development/log/phase1.1-results.md)，
+Phase 1 基线见 [`phase1-results.md`](docs/development/log/phase1-results.md)。
 
 ## 目录
 
@@ -126,10 +137,14 @@ PANO_CONFIG_DIR=/tmp/pano-config QT_QPA_PLATFORM=offscreen \
 ## 已知限制
 
 - 只在 Linux 上验证；Windows 未实际构建。
-- 高 DPI、超大 PDF、真实鼠标的复杂标注/旋转操作仍需人工验收。
-- 文字选择限制在单页；扫描 PDF 没有 OCR；不支持 PDF 导出。
+- 高 DPI、超大 PDF、真实鼠标的复杂标注/旋转操作仍需人工验收；本轮已检查
+  1440×900 下的书库/阅读/主题截图。
+- 文字选择限制在单页；扫描 PDF 没有 OCR；不支持 PDF 导出；双栏英文论文的跨栏选区
+  仍建议人工复核。
 - 公式渲染覆盖常用子集，不支持的 TeX 命令会以源码或占位显示。
 - 橡皮为点击式删除，尚未实现连续擦除。
+- 多级书架、拖拽、缩略图和设置取消/应用已实现并做过程序化检查，但复杂交互仍建议人工
+  走查。
 - 本阶段不包含云同步、账号、移动端或多人协作。
 
 ## 许可

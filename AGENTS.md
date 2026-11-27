@@ -12,8 +12,8 @@ xmake -j4
 ```
 
 - 更改 Qt/C++ 代码后至少运行一次 `xmake -j4`；涉及数据层时运行
-  `pano-library-probe`；涉及阅读器坐标时运行 `pano-coordinate-probe`；涉及主界面/
-  会话时运行 `pano-phase1-probe`。
+  `pano-library-probe`；涉及阅读器坐标时运行 `pano-coordinate-probe`；涉及文字选区
+  合并时运行 `pano-text-geometry-probe`；涉及主界面/会话时运行 `pano-phase1-probe`。
 - 视觉检查使用真实运行或离屏探针生成的截图；不要把“编译通过”当作视觉验收。
 - 探针是稀疏检查，不替代人工 GUI 测试。添加探针时优先覆盖数据安全、格式契约、
   坐标变换和持久化闭环，避免为每个控件写脆弱的 UI 测试。

@@ -2,6 +2,7 @@
 
 #include "annotation/AnnotationCommands.h"
 #include "annotation/AnnotationRenderer.h"
+#include "annotation/TextSelectionGeometry.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -215,6 +216,8 @@ void PdfView::setTool(Tool tool)
     Qt::CursorShape shape = Qt::ArrowCursor;
     if (tool == Tool::TextSelect)
         shape = Qt::IBeamCursor;
+    else if (tool == Tool::Hand)
+        shape = Qt::OpenHandCursor;
     else if (tool == Tool::Note || tool == Tool::Eraser)
         shape = Qt::PointingHandCursor;
     else if (tool != Tool::Select)
@@ -229,6 +232,8 @@ QString PdfView::toolDisplayName(Tool tool)
     switch (tool) {
     case Tool::Select:
         return tr("选择/移动");
+    case Tool::Hand:
+        return tr("抓手");
     case Tool::TextSelect:
         return tr("文本选择");
     case Tool::Highlight:
@@ -259,6 +264,12 @@ void PdfView::setDefaultStyle(const AnnotationStyle &style)
 {
     m_defaultStyle = style;
     m_styleUserModified = true;
+}
+
+void PdfView::refreshToolPreset()
+{
+    m_styleUserModified = false;
+    applyToolPreset(m_tool);
 }
 
 void PdfView::applyToolPreset(Tool tool)
@@ -298,6 +309,7 @@ void PdfView::applyToolPreset(Tool tool)
         style.fillColor = QColor();
         break;
     case Tool::Select:
+    case Tool::Hand:
     case Tool::TextSelect:
     case Tool::Eraser:
     case Tool::Note:
@@ -414,6 +426,41 @@ void PdfView::goToPage(int pageIndex)
     updateCurrentPage();
     emit pageChanged(m_currentPage);
     viewport()->update();
+}
+
+QPointF PdfView::viewportAnchor(int *pageIndex) const
+{
+    if (pageIndex)
+        *pageIndex = m_currentPage;
+    if (!hasDocument() || m_pageSizes.isEmpty())
+        return QPointF();
+
+    const QPointF center(viewport()->width() / 2.0, viewport()->height() / 2.0);
+    int target = m_currentPage;
+    for (int page = 0; page < m_pageSizes.size(); ++page) {
+        if (pageRectInView(page).contains(center)) {
+            target = page;
+            break;
+        }
+        if (pageRectInView(page).top() <= center.y() && pageRectInView(page).bottom() >= center.y()) {
+            target = page;
+            break;
+        }
+    }
+    if (pageIndex)
+        *pageIndex = target;
+    const QPointF pagePoint = pageToViewTransform(target).inverted().map(center);
+    const QSizeF pageSize = m_pageSizes.value(target);
+    return QPointF(qBound<qreal>(0.0, pagePoint.x(), pageSize.width()),
+                   qBound<qreal>(0.0, pagePoint.y(), pageSize.height()));
+}
+
+void PdfView::restoreViewportAnchor(int pageIndex, const QPointF &pagePoint)
+{
+    if (!hasDocument() || pageIndex < 0 || pageIndex >= pageCount())
+        return;
+    if (!pagePoint.isNull())
+        goToPosition(pageIndex, pagePoint);
 }
 
 void PdfView::goToPosition(int pageIndex, const QPointF &pagePoint)
@@ -624,7 +671,7 @@ void PdfView::paintEvent(QPaintEvent *event)
     QPainter painter(viewport());
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    painter.fillRect(viewport()->rect(), QColor(QStringLiteral("#eceef2")));
+    painter.fillRect(viewport()->rect(), palette().color(QPalette::AlternateBase));
 
     if (!hasDocument() || m_pageSizes.isEmpty()) {
         paintEmptyState(painter);
@@ -1017,6 +1064,7 @@ void PdfView::scrollContentsBy(int dx, int dy)
     Q_UNUSED(dx);
     Q_UNUSED(dy);
     updateCurrentPage();
+    emit readingAnchorChanged();
     viewport()->update();
 }
 
@@ -1103,6 +1151,13 @@ void PdfView::mousePressEvent(QMouseEvent *event)
 
     const QPointF pagePoint = viewToPage(viewPos, pageIndex);
 
+    if (m_tool == Tool::Hand) {
+        m_dragMode = DragMode::None;
+        m_handLastView = viewPos;
+        viewport()->setCursor(Qt::ClosedHandCursor);
+        return;
+    }
+
     if (m_tool == Tool::Note) {
         Annotation annotation = makeBaseAnnotation(AnnotationType::NotePoint, pageIndex);
         annotation.p1 = pagePoint;
@@ -1165,6 +1220,17 @@ void PdfView::mouseMoveEvent(QMouseEvent *event)
         return;
     }
     const QPointF viewPos = event->position();
+    if (m_tool == Tool::Hand) {
+        if (event->buttons() & Qt::LeftButton) {
+            const QPointF delta = viewPos - m_handLastView;
+            m_handLastView = viewPos;
+            horizontalScrollBar()->setValue(horizontalScrollBar()->value() - qRound(delta.x()));
+            verticalScrollBar()->setValue(verticalScrollBar()->value() - qRound(delta.y()));
+            viewport()->update();
+        }
+        QAbstractScrollArea::mouseMoveEvent(event);
+        return;
+    }
 
     switch (m_dragMode) {
     case DragMode::TextSelection:
@@ -1218,6 +1284,11 @@ void PdfView::mouseMoveEvent(QMouseEvent *event)
 
 void PdfView::mouseReleaseEvent(QMouseEvent *event)
 {
+    if (m_tool == Tool::Hand) {
+        viewport()->setCursor(Qt::OpenHandCursor);
+        QAbstractScrollArea::mouseReleaseEvent(event);
+        return;
+    }
     if (event->button() != Qt::LeftButton) {
         QAbstractScrollArea::mouseReleaseEvent(event);
         return;
@@ -1661,8 +1732,11 @@ void PdfView::createTextAnnotation(const QPdfSelection &selection, int pageIndex
         type = AnnotationType::StrikeOut;
 
     Annotation annotation = makeBaseAnnotation(type, pageIndex);
-    annotation.rect = selection.boundingRectangle().normalized();
-    annotation.polygons = selection.bounds();
+    annotation.polygons = TextSelectionGeometry::normalize(selection.bounds());
+    QRectF mergedRect;
+    for (const QPolygonF &polygon : annotation.polygons)
+        mergedRect = mergedRect.isNull() ? polygon.boundingRect() : mergedRect.united(polygon.boundingRect());
+    annotation.rect = mergedRect.normalized();
     annotation.textStart = selection.startIndex();
     annotation.textEnd = selection.endIndex();
     annotation.text = selection.text();

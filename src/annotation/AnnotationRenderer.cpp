@@ -1,5 +1,7 @@
 #include "AnnotationRenderer.h"
 
+#include "TextSelectionGeometry.h"
+
 #include <QImage>
 #include <QLineF>
 #include <QPainterPathStroker>
@@ -20,11 +22,21 @@ QPainterPath pathFromPoints(const QVector<QPointF> &points)
     return path;
 }
 
+QVector<QPolygonF> effectivePolygons(const Annotation &annotation)
+{
+    if (annotation.type == AnnotationType::Highlight
+        || annotation.type == AnnotationType::Underline
+        || annotation.type == AnnotationType::StrikeOut) {
+        return TextSelectionGeometry::normalize(annotation.polygons);
+    }
+    return annotation.polygons;
+}
+
 QPainterPath polygonPath(const Annotation &annotation)
 {
     QPainterPath path;
     path.setFillRule(Qt::WindingFill);
-    for (const QPolygonF &polygon : annotation.polygons)
+    for (const QPolygonF &polygon : effectivePolygons(annotation))
         path.addPolygon(polygon);
     return path;
 }
@@ -159,7 +171,7 @@ QPainterPath hitPath(const Annotation &annotation, qreal tolerancePt)
     case AnnotationType::StrikeOut: {
         QPainterPath path = polygonPath(annotation);
         QPainterPath result = path;
-        for (const QPolygonF &polygon : annotation.polygons) {
+        for (const QPolygonF &polygon : effectivePolygons(annotation)) {
             QPainterPath polygonPath;
             polygonPath.addPolygon(polygon);
             result.addPath(strokedPath(polygonPath, tolerance * 2.0));
@@ -255,7 +267,7 @@ void paint(QPainter &painter, const Annotation &annotation, const QTransform &pa
     case AnnotationType::Underline:
     case AnnotationType::StrikeOut: {
         const qreal width = qMax<qreal>(0.25, annotation.style.strokeWidthPt);
-        for (const QPolygonF &polygon : annotation.polygons) {
+        for (const QPolygonF &polygon : effectivePolygons(annotation)) {
             const QRectF box = polygon.boundingRect();
             qreal y = 0.0;
             if (annotation.type == AnnotationType::Underline)

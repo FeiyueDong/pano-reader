@@ -1,5 +1,7 @@
 #include "document/DocumentSession.h"
 
+#include <QCryptographicHash>
+#include <QFile>
 #include <QDir>
 #include <QtGlobal>
 #include <QFileInfo>
@@ -10,15 +12,18 @@
 
 #include "app/ReaderWorkspace.h"
 #include "library/LibraryManager.h"
+#include "settings/SettingsManager.h"
 #include "reader/PdfView.h"
 #include "storage/JsonUtils.h"
 #include "storage/LibraryStore.h"
 
 namespace pano {
 
-DocumentSession::DocumentSession(LibraryManager *manager, const BookInfo &book, QObject *parent)
+DocumentSession::DocumentSession(LibraryManager *manager, const BookInfo &book,
+                                 SettingsManager *settings, QObject *parent)
     : QObject(parent)
     , m_manager(manager)
+    , m_settings(settings)
     , m_book(book)
 {
     m_autosaveTimer = new QTimer(this);
@@ -28,6 +33,11 @@ DocumentSession::DocumentSession(LibraryManager *manager, const BookInfo &book, 
     m_maxTimer = new QTimer(this);
     m_maxTimer->setSingleShot(true);
     connect(m_maxTimer, &QTimer::timeout, this, &DocumentSession::autosave);
+
+    m_readingTimer = new QTimer(this);
+    m_readingTimer->setSingleShot(true);
+    m_readingTimer->setInterval(1200);
+    connect(m_readingTimer, &QTimer::timeout, this, &DocumentSession::saveReadingState);
 
     m_workspace = new ReaderWorkspace(this);
     connect(view(), &PdfView::annotationsChanged, this, &DocumentSession::markDirty);
@@ -40,6 +50,7 @@ DocumentSession::DocumentSession(LibraryManager *manager, const BookInfo &book, 
     connect(view(), &PdfView::pageChanged, this, &DocumentSession::onPageChanged);
     connect(view(), &PdfView::zoomChanged, this, &DocumentSession::onZoomChanged);
     connect(view(), &PdfView::rotationChanged, this, &DocumentSession::onRotationChanged);
+    connect(view(), &PdfView::readingAnchorChanged, this, &DocumentSession::scheduleReadingSave);
 }
 
 DocumentSession::~DocumentSession()
@@ -50,6 +61,11 @@ DocumentSession::~DocumentSession()
         delete m_workspace;
         m_workspace = nullptr;
     }
+}
+
+ToolPresets *DocumentSession::toolPresets() const
+{
+    return m_settings ? m_settings->toolPresets() : nullptr;
 }
 
 PdfView *DocumentSession::view() const
@@ -103,6 +119,8 @@ bool DocumentSession::load(QString *errorMessage)
         m_loading = false;
         return false;
     }
+
+    m_annotationsFingerprint = annotationsFingerprint();
 
     QVector<Annotation> parsed;
     parsed.reserve(annotations.size());
@@ -165,9 +183,19 @@ bool DocumentSession::saveNow(QString *errorMessage)
 {
     if (!m_loaded || !m_manager || !m_manager->isOpen())
         return true;
+    if (m_workspace)
+        m_workspace->commitPendingNote();
     if (!m_dirty) {
         saveReadingState();
         return true;
+    }
+
+    const QByteArray currentFingerprint = annotationsFingerprint();
+    if (currentFingerprint != m_annotationsFingerprint) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("标注文件已被外部修改，已停止保存以避免覆盖。请关闭并重新打开本书后重试。");
+        emit saveFailed(errorMessage ? *errorMessage : QString());
+        return false;
     }
 
     QJsonArray annotations;
@@ -183,6 +211,7 @@ bool DocumentSession::saveNow(QString *errorMessage)
         return false;
     }
 
+    m_annotationsFingerprint = annotationsFingerprint();
     saveReadingState();
     m_dirty = false;
     m_autosaveActive = false;
@@ -239,17 +268,23 @@ void DocumentSession::autosave()
 
 void DocumentSession::onPageChanged(int)
 {
-    scheduleAutosave();
+    scheduleReadingSave();
 }
 
 void DocumentSession::onZoomChanged(qreal)
 {
-    scheduleAutosave();
+    scheduleReadingSave();
 }
 
 void DocumentSession::onRotationChanged(int)
 {
-    scheduleAutosave();
+    scheduleReadingSave();
+}
+
+void DocumentSession::scheduleReadingSave()
+{
+    if (m_loaded && m_readingTimer)
+        m_readingTimer->start();
 }
 
 ReadingState DocumentSession::readingState() const
@@ -262,6 +297,10 @@ ReadingState DocumentSession::readingState() const
     state.zoom = view()->zoom();
     state.rotation = view()->rotation();
     state.zoomMode = m_zoomMode;
+    int anchorPage = 0;
+    state.pagePoint = view()->viewportAnchor(&anchorPage);
+    if (anchorPage >= 0)
+        state.pageIndex = anchorPage;
     return state;
 }
 
@@ -339,6 +378,15 @@ bool DocumentSession::writeAsset(const QString &prefix, const QString &extension
     if (relativePath)
         *relativePath = QStringLiteral("assets/%1").arg(fileName);
     return true;
+}
+
+QByteArray DocumentSession::annotationsFingerprint() const
+{
+    const QString path = QDir(bookDirectory()).filePath(QStringLiteral("annotations.json"));
+    QFile file(path);
+    if (!file.exists() || !file.open(QIODevice::ReadOnly))
+        return QByteArray();
+    return QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256);
 }
 
 } // namespace pano

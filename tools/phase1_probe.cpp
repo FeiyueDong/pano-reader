@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <QDir>
 #include <QEventLoop>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonObject>
 #include <QTimer>
@@ -9,6 +10,8 @@
 
 #include "annotation/AnnotationCommands.h"
 #include "app/MainWindow.h"
+#include "document/DocumentSession.h"
+#include "reader/PdfView.h"
 #include "library/LibraryManager.h"
 #include "reader/PdfView.h"
 
@@ -121,7 +124,8 @@ int main(int argc, char **argv)
         check(view->currentPage() == 1, "precise page navigation");
         view->goToPage(0);
         check(view->annotations()->annotations().size() == 1, "annotation added");
-        waitFor(300);
+        QMetaObject::invokeMethod(window, "saveCurrent", Qt::DirectConnection);
+        waitFor(250);
         window->grab().save(QStringLiteral("build/probe/phase1-ui.png"));
         // Exercise reading-state persistence: page, zoom and rotation are saved
         // separately from annotations and restored with the session.
@@ -130,6 +134,40 @@ int main(int argc, char **argv)
         view->setRotation(90);
         QMetaObject::invokeMethod(window, "saveCurrent", Qt::DirectConnection);
         waitFor(300);
+
+        // External modification protection: touch annotations.json after the
+        // session loaded it, try to save, and verify the file is not overwritten.
+        if (auto *session = window->findChild<pano::DocumentSession *>()) {
+            const QString annotationsPath =
+                QDir(libraryPath).filePath(book.directory + QStringLiteral("/annotations.json"));
+            QFile file(annotationsPath);
+            QByteArray original;
+            if (file.open(QIODevice::ReadOnly)) {
+                original = file.readAll();
+                file.close();
+            }
+            if (!original.isEmpty() && file.open(QIODevice::Append)) {
+                file.write("\n");
+                file.close();
+                pano::AnnotationNote changed = note;
+                changed.markdown += QStringLiteral("\n\n外部修改测试");
+                view->setAnnotationNote(annotation.id, changed);
+                // The application normally shows a modal warning for this
+                // failure; the probe disconnects it to stay non-interactive.
+                QObject::disconnect(session, &pano::DocumentSession::saveFailed,
+                                    nullptr, nullptr);
+                QString saveError;
+                const bool blocked = !session->saveNow(&saveError);
+                check(blocked && saveError.contains(QStringLiteral("外部修改")),
+                      "external annotation modification blocked");
+                if (QFile restore(annotationsPath); restore.open(QIODevice::WriteOnly)) {
+                    restore.write(original);
+                    restore.close();
+                }
+                QString retryError;
+                check(session->saveNow(&retryError), "save resumes after restore");
+            }
+        }
     } else {
         window->grab().save(QStringLiteral("build/probe/phase1-ui.png"));
     }

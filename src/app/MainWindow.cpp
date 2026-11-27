@@ -68,7 +68,6 @@ MainWindow::MainWindow(QWidget *parent)
     buildUi();
     buildActions();
     buildMenus();
-    buildToolBar();
     buildStatusBar();
     applyThemeFromSettings();
 
@@ -108,7 +107,7 @@ void MainWindow::buildUi()
 
     m_libraryPage = new QStackedWidget(m_tabs);
     m_welcome = buildWelcomePage();
-    m_libraryView = new LibraryView(m_manager, m_libraryPage);
+    m_libraryView = new LibraryView(m_manager, m_settings, m_libraryPage);
     m_libraryPage->addWidget(m_welcome);
     m_libraryPage->addWidget(m_libraryView);
     m_tabs->addTab(m_libraryPage, tr("书库"));
@@ -118,6 +117,9 @@ void MainWindow::buildUi()
     connect(m_tabs, &QTabWidget::tabCloseRequested, this, &MainWindow::onTabCloseRequested);
     connect(m_libraryView, &LibraryView::bookOpenRequested, this, &MainWindow::openBookFromLibrary);
     connect(m_libraryView, &LibraryView::statusMessage, this, &MainWindow::setStatus);
+    m_libraryView->setBeforeTrashHandler([this](const QString &bookId) {
+        return closeSessionForBook(bookId);
+    });
 }
 
 QWidget *MainWindow::buildWelcomePage()
@@ -376,6 +378,21 @@ void MainWindow::buildStatusBar()
 
 void MainWindow::applyThemeFromSettings()
 {
+    struct Anchor {
+        DocumentSession *session;
+        int page;
+        QPointF point;
+    };
+    QVector<Anchor> anchors;
+    anchors.reserve(m_sessions.size());
+    for (DocumentSession *session : std::as_const(m_sessions)) {
+        if (!session->view()->hasDocument())
+            continue;
+        int page = 0;
+        const QPointF point = session->view()->viewportAnchor(&page);
+        anchors.append({session, page, point});
+    }
+
     ThemeId id = ThemeId::ModernLight;
     if (!ThemeManager::fromKey(m_settings->settings().themeKey, &id))
         id = ThemeId::ModernLight;
@@ -383,6 +400,11 @@ void MainWindow::applyThemeFromSettings()
     QFont font = QApplication::font();
     font.setPointSize(m_settings->settings().uiFontSize);
     QApplication::setFont(font);
+
+    for (const Anchor &anchor : std::as_const(anchors)) {
+        if (anchor.session->view()->hasDocument())
+            anchor.session->view()->restoreViewportAnchor(anchor.page, anchor.point);
+    }
 }
 
 void MainWindow::newLibrary()
@@ -492,7 +514,7 @@ bool MainWindow::openBook(const QString &bookId)
     }
 
     const BookInfo book = m_manager->bookInfo(bookId);
-    auto *session = new DocumentSession(m_manager, book, this);
+    auto *session = new DocumentSession(m_manager, book, m_settings, this);
     QString error;
     if (!session->load(&error)) {
         delete session;
@@ -711,6 +733,28 @@ void MainWindow::saveCurrent()
         showError(tr("保存失败"), error);
 }
 
+bool MainWindow::closeSessionForBook(const QString &bookId)
+{
+    for (DocumentSession *session : std::as_const(m_sessions)) {
+        if (session->bookId() != bookId)
+            continue;
+        if (!saveSession(session, true))
+            return false;
+        const int index = m_tabs->indexOf(session->workspace());
+        if (index > 0)
+            m_tabs->removeTab(index);
+        m_sessions.removeAll(session);
+        if (m_shortcutView == session->view())
+            setShortcutScope(nullptr);
+        delete session;
+        updateOpenTabs();
+        updateActions();
+        updateWindowTitle();
+        return true;
+    }
+    return true;
+}
+
 bool MainWindow::closeAllSessions(bool prompt)
 {
     const QVector<DocumentSession *> sessions = m_sessions;
@@ -751,9 +795,10 @@ void MainWindow::zoomOut()
 
 void MainWindow::fitWidth()
 {
-    if (currentSession())
-        currentSession()->setZoomMode(ZoomMode::FitWidth);
-        currentSession()->view()->fitWidth();
+    if (!currentSession())
+        return;
+    currentSession()->setZoomMode(ZoomMode::FitWidth);
+    currentSession()->view()->fitWidth();
 }
 
 void MainWindow::fitPage()
@@ -779,7 +824,7 @@ void MainWindow::pageChanged(int page)
 
 void MainWindow::zoomEdited()
 {
-    if (!currentSession())
+    if (!currentSession() || !m_zoomCombo)
         return;
     QString text = m_zoomCombo->currentText().trimmed();
     text.remove(QLatin1Char('%'));
@@ -808,8 +853,10 @@ void MainWindow::updateActions()
     m_fitWidthAction->setEnabled(reader);
     m_fitPageAction->setEnabled(reader);
     m_rotateAction->setEnabled(reader);
-    m_pageSpin->setEnabled(reader);
-    m_zoomCombo->setEnabled(reader);
+    if (m_pageSpin)
+        m_pageSpin->setEnabled(reader);
+    if (m_zoomCombo)
+        m_zoomCombo->setEnabled(reader);
     for (QAction *action : m_toolActions)
         action->setEnabled(reader);
     m_importAction->setEnabled(m_manager && m_manager->isOpen());
@@ -834,16 +881,17 @@ void MainWindow::updateSessionStatus()
     }
     PdfView *view = session->view();
     const int pageCount = std::max(1, view->pageCount());
-    {
+    if (m_pageSpin) {
         QSignalBlocker blocker(m_pageSpin);
         m_pageSpin->setRange(1, pageCount);
         m_pageSpin->setValue(view->currentPage() + 1);
     }
-    {
+    if (m_zoomCombo) {
         QSignalBlocker blocker(m_zoomCombo);
         m_zoomCombo->setEditText(QStringLiteral("%1%").arg(qRound(view->zoom() * 100.0)));
     }
-    m_pageLabel->setText(tr("页码 / %1").arg(pageCount));
+    if (m_pageLabel)
+        m_pageLabel->setText(tr("页码 / %1").arg(pageCount));
     m_statusLabel->setText(tr("第 %1 / %2 页 · %3% · 旋转 %4° · 缓存 %5 MiB")
                                .arg(view->currentPage() + 1)
                                .arg(pageCount)
@@ -916,14 +964,11 @@ void MainWindow::showError(const QString &title, const QString &message)
 void MainWindow::showPreferences()
 {
     SettingsDialog dialog(m_settings, m_themes, this);
-    dialog.setAnnotationStyle(currentSession() ? currentSession()->view()->defaultStyle()
-                                               : AnnotationStyle());
     if (dialog.exec() != QDialog::Accepted)
         return;
-    const AnnotationStyle style = dialog.annotationStyle();
     for (DocumentSession *session : m_sessions) {
         session->setAutosaveSeconds(m_settings->settings().autosaveSeconds);
-        session->view()->setDefaultStyle(style);
+        session->workspace()->reloadToolPreset();
     }
     updateActions();
     setStatus(tr("设置已保存。"));

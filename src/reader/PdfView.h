@@ -25,6 +25,7 @@ class PdfView : public QAbstractScrollArea
 public:
     enum class Tool {
         Select,
+        Hand,
         TextSelect,
         Highlight,
         Underline,
@@ -56,6 +57,7 @@ public:
 
     void setDefaultStyle(const AnnotationStyle &style);
     void applyToolPreset(Tool tool);
+    void refreshToolPreset();
     AnnotationStyle defaultStyle() const { return m_defaultStyle; }
 
     qreal zoom() const;
@@ -72,6 +74,8 @@ public:
     int currentPage() const { return m_currentPage; }
     void goToPage(int pageIndex);
     void goToPosition(int pageIndex, const QPointF &pagePoint);
+    QPointF viewportAnchor(int *pageIndex) const;
+    void restoreViewportAnchor(int pageIndex, const QPointF &pagePoint);
     void revealPageRegion(int pageIndex, const QRectF &pageBounds);
     void revealAnnotation(const QString &annotationId);
     int pageCount() const;
@@ -89,6 +93,7 @@ public:
 
 signals:
     void pageChanged(int pageIndex);
+    void readingAnchorChanged();
     void zoomChanged(qreal zoom);
     void rotationChanged(int degrees);
     void toolChanged(PdfView::Tool tool);
@@ -184,6 +189,7 @@ private:
     QPointF m_dragStartPage;
     QPointF m_dragCurrentPage;
     QPointF m_dragStartView;
+    QPointF m_handLastView;
     QPointF m_dragLastPage;
     int m_resizeHandle = -1;
     bool m_dragMoved = false;

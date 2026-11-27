@@ -41,6 +41,7 @@ signals:
     void cancelRequested();
     void imageRequested();
     void captureRequested();
+    void contentChanged();
 
 private:
     QLabel *m_heading = nullptr;

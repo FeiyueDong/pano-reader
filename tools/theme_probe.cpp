@@ -62,12 +62,14 @@ int main(int argc, char **argv)
         waitFor(200);
         check(qApp->styleSheet().contains(QStringLiteral("#1c2027")), "dark stylesheet applied");
         window->grab().save(QStringLiteral("build/probe/theme-dark-library.png"));
-        themes->setCurrentTheme(ThemeId::ModernLight, qApp);
-        waitFor(100);
     }
     check(window->openBook(bookId), "open book");
     waitFor(900);
     window->grab().save(QStringLiteral("build/probe/theme-reader.png"));
+    if (themes) {
+        themes->setCurrentTheme(ThemeId::ModernLight, qApp);
+        waitFor(100);
+    }
     delete window;
     waitFor(100);
     std::printf("theme probe %s (%d failures)\n", failures == 0 ? "passed" : "failed", failures);

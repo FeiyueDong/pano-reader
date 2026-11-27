@@ -4,17 +4,30 @@
 #include <QString>
 #include <QStringList>
 
+#include "library/LibraryTypes.h"
+#include "settings/ToolPresets.h"
+
 namespace pano {
 
 struct AppSettings {
     QString themeKey = QStringLiteral("modern-light");
-    int uiFontSize = 10;
+    int uiFontSize = 11;
     bool restoreLastLibrary = true;
     bool restoreOpenTabs = true;
     QString lastLibraryPath;
     QString lastBookId;
     QStringList lastOpenBooks;
     int autosaveSeconds = 2;
+    ImportMode defaultImportMode = ImportMode::Copy;
+    bool libraryCoverView = true;
+    bool libraryNavVisible = true;
+    bool libraryInfoVisible = true;
+    int libraryNavWidth = 230;
+    int libraryInfoWidth = 340;
+    bool readerLeftVisible = true;
+    bool readerRightVisible = true;
+    int readerLeftWidth = 280;
+    int readerRightWidth = 340;
 };
 
 class SettingsManager : public QObject
@@ -40,12 +53,20 @@ public:
     void setLastLibraryPath(const QString &path);
     void setLastBookId(const QString &bookId);
     void setLastOpenBooks(const QStringList &bookIds);
+    void setDefaultImportMode(ImportMode mode);
+    void setLibraryCoverView(bool cover);
+    void setLibraryPanelState(bool navVisible, bool infoVisible, int navWidth, int infoWidth);
+    void setReaderPanelState(bool leftVisible, bool rightVisible, int leftWidth, int rightWidth);
+
+    ToolPresets *toolPresets() { return &m_toolPresets; }
+    const ToolPresets *toolPresets() const { return &m_toolPresets; }
 
 signals:
     void settingsChanged();
 
 private:
     AppSettings m_settings;
+    ToolPresets m_toolPresets;
 };
 
 } // namespace pano

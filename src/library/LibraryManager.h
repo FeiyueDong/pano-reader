@@ -50,6 +50,7 @@ public:
     bool createShelf(const QString &name, const QString &parentId,
                      QString *errorMessage, QString *shelfId = nullptr);
     bool renameShelf(const QString &shelfId, const QString &name, QString *errorMessage);
+    bool moveShelf(const QString &shelfId, const QString &newParentId, QString *errorMessage);
     bool deleteShelf(const QString &shelfId, QString *errorMessage);
     bool addBookToShelf(const QString &shelfId, const QString &bookId, QString *errorMessage);
     bool removeBookFromShelf(const QString &shelfId, const QString &bookId, QString *errorMessage);

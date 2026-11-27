@@ -49,23 +49,34 @@ SettingsDialog::SettingsDialog(SettingsManager *settings, ThemeManager *themes, 
                                          this);
     connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
         applyLiveSettings();
+        if (!flushPresetEdits())
+            return;
         QString error;
         if (!m_settings->save(&error)) {
             QMessageBox::warning(this, tr("保存设置失败"), error);
             return;
         }
+        m_appliedSettings = m_settings->settings();
         accept();
     });
     connect(buttons, &QDialogButtonBox::rejected, this, &SettingsDialog::rejectSettings);
     connect(buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked, this, [this]() {
         applyLiveSettings();
+        if (!flushPresetEdits())
+            return;
         QString error;
         if (!m_settings->save(&error))
             QMessageBox::warning(this, tr("保存设置失败"), error);
+        else
+            m_appliedSettings = m_settings->settings();
     });
     layout->addWidget(buttons);
 
+    m_loading = true;
     loadValues();
+    m_loading = false;
+    if (m_settings)
+        m_appliedSettings = m_settings->settings();
 }
 
 QWidget *SettingsDialog::buildAppearanceTab()
@@ -110,6 +121,11 @@ QWidget *SettingsDialog::buildDataTab()
     auto *openFolder = new QPushButton(tr("打开书库目录"), box);
     connect(openFolder, &QPushButton::clicked, this, &SettingsDialog::chooseLibraryFolder);
     form->addRow(QString(), openFolder);
+
+    m_importModeCombo = new QComboBox(box);
+    m_importModeCombo->addItem(tr("复制到书库"), static_cast<int>(ImportMode::Copy));
+    m_importModeCombo->addItem(tr("引用原文件（不复制）"), static_cast<int>(ImportMode::Reference));
+    form->addRow(tr("默认导入方式"), m_importModeCombo);
     layout->addWidget(box);
 
     auto *note = new QLabel(
@@ -151,13 +167,28 @@ QWidget *SettingsDialog::buildAnnotationTab()
 {
     auto *widget = new QWidget(this);
     auto *layout = new QVBoxLayout(widget);
-    auto *box = new QGroupBox(tr("新标注默认样式"), widget);
+    auto *box = new QGroupBox(tr("工具预设"), widget);
     auto *form = new QFormLayout(box);
+
+    m_presetToolCombo = new QComboBox(box);
+    for (const QString &toolId : ToolPresets::toolIds()) {
+        if (toolId == QStringLiteral("select") || toolId == QStringLiteral("text")
+            || toolId == QStringLiteral("eraser"))
+            continue;
+        m_presetToolCombo->addItem(ToolPresets::displayName(toolId), toolId);
+    }
+    connect(m_presetToolCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (m_loading || index < 0)
+            return;
+        storePresetEditor();
+        loadPresetEditor(m_presetToolCombo->itemData(index).toString());
+    });
+    form->addRow(tr("工具"), m_presetToolCombo);
 
     m_strokeButton = new QPushButton(tr("选择颜色"), box);
     connect(m_strokeButton, &QPushButton::clicked, this, [this]() {
         const QColor initial = m_style.strokeColor;
-        const QColor color = QColorDialog::getColor(initial, this, tr("默认描边颜色"),
+        const QColor color = QColorDialog::getColor(initial, this, tr("预设描边颜色"),
                                                     QColorDialog::ShowAlphaChannel);
         if (!color.isValid())
             return;
@@ -186,8 +217,20 @@ QWidget *SettingsDialog::buildAnnotationTab()
     m_blendCombo->addItem(tr("正片叠底"), static_cast<int>(BlendMode::Multiply));
     form->addRow(tr("混合模式"), m_blendCombo);
 
+    m_presetResetButton = new QPushButton(tr("恢复该工具默认值"), box);
+    connect(m_presetResetButton, &QPushButton::clicked, this, [this]() {
+        const QString toolId = m_presetToolCombo->currentData().toString();
+        if (toolId.isEmpty())
+            return;
+        m_presetEdits[toolId] = ToolPresets::defaultStyle(toolId);
+        loadPresetEditor(toolId);
+    });
+    form->addRow(QString(), m_presetResetButton);
+
     layout->addWidget(box);
-    auto *note = new QLabel(tr("该样式作为新建标注的初始值；阅读标签中的属性面板仍可随时覆盖。"), widget);
+    auto *note = new QLabel(tr("预设按工具独立保存，新标注使用当前工具预设；已有标注不会被改写。"
+                               "阅读器属性栏修改会写回同一份预设。"),
+                            widget);
     note->setWordWrap(true);
     layout->addWidget(note);
     layout->addStretch(1);
@@ -247,14 +290,48 @@ void SettingsDialog::loadValues()
     m_restoreLibrary->setChecked(settings.restoreLastLibrary);
     m_restoreTabs->setChecked(settings.restoreOpenTabs);
     m_autosaveSpin->setValue(settings.autosaveSeconds);
+    if (m_importModeCombo) {
+        const int index = m_importModeCombo->findData(static_cast<int>(settings.defaultImportMode));
+        if (index >= 0)
+            m_importModeCombo->setCurrentIndex(index);
+    }
 
-    m_widthSpin->setValue(m_style.strokeWidthPt);
-    m_opacitySpin->setValue(qRound(m_style.opacity * 100.0));
-    const int blendIndex = m_blendCombo->findData(static_cast<int>(m_style.blend));
+    m_presetEdits.clear();
+    if (m_settings) {
+        for (const QString &toolId : ToolPresets::toolIds())
+            m_presetEdits.insert(toolId, m_settings->toolPresets()->style(toolId));
+    }
+    if (m_presetToolCombo && m_presetToolCombo->count() > 0) {
+        m_presetToolCombo->setCurrentIndex(0);
+        loadPresetEditor(m_presetToolCombo->itemData(0).toString());
+    }
+}
+
+void SettingsDialog::storePresetEditor()
+{
+    if (m_currentPresetTool.isEmpty() || !m_widthSpin)
+        return;
+    AnnotationStyle style = m_style;
+    style.strokeWidthPt = m_widthSpin->value();
+    style.opacity = m_opacitySpin->value() / 100.0;
+    style.blend = static_cast<BlendMode>(m_blendCombo->currentData().toInt());
+    m_presetEdits.insert(m_currentPresetTool, style);
+}
+
+void SettingsDialog::loadPresetEditor(const QString &toolId)
+{
+    if (toolId.isEmpty())
+        return;
+    m_currentPresetTool = toolId;
+    const AnnotationStyle style = m_presetEdits.value(toolId, ToolPresets::defaultStyle(toolId));
+    m_style = style;
+    m_widthSpin->setValue(style.strokeWidthPt);
+    m_opacitySpin->setValue(qRound(style.opacity * 100.0));
+    const int blendIndex = m_blendCombo->findData(static_cast<int>(style.blend));
     if (blendIndex >= 0)
         m_blendCombo->setCurrentIndex(blendIndex);
-    if (m_style.strokeColor.isValid()) {
-        const QColor color = m_style.strokeColor;
+    if (style.strokeColor.isValid()) {
+        const QColor color = style.strokeColor;
         m_strokeButton->setText(color.name(QColor::HexArgb));
         m_strokeButton->setStyleSheet(
             QStringLiteral("background:%1; color:%2;")
@@ -263,9 +340,24 @@ void SettingsDialog::loadValues()
     }
 }
 
+bool SettingsDialog::flushPresetEdits()
+{
+    if (!m_settings)
+        return true;
+    storePresetEditor();
+    for (auto it = m_presetEdits.constBegin(); it != m_presetEdits.constEnd(); ++it)
+        m_settings->toolPresets()->setStyle(it.key(), it.value());
+    QString error;
+    if (!m_settings->toolPresets()->save(&error)) {
+        QMessageBox::warning(this, tr("保存工具预设失败"), error);
+        return false;
+    }
+    return true;
+}
+
 void SettingsDialog::applyLiveSettings()
 {
-    if (!m_settings || !m_themes)
+    if (!m_settings || !m_themes || m_loading)
         return;
     const QString themeKey = m_themeCombo->currentData().toString();
     ThemeId id = ThemeId::ModernLight;
@@ -276,6 +368,9 @@ void SettingsDialog::applyLiveSettings()
     m_settings->setRestoreLastLibrary(m_restoreLibrary->isChecked());
     m_settings->setRestoreOpenTabs(m_restoreTabs->isChecked());
     m_settings->setAutosaveSeconds(m_autosaveSpin->value());
+    if (m_importModeCombo)
+        m_settings->setDefaultImportMode(
+            static_cast<ImportMode>(m_importModeCombo->currentData().toInt()));
     m_settings->setLastLibraryPath(m_libraryPath->text() == tr("（未打开书库）")
                                        ? QString()
                                        : m_libraryPath->text());
@@ -292,20 +387,20 @@ void SettingsDialog::applyFont()
 void SettingsDialog::rejectSettings()
 {
     if (m_settings) {
-        m_settings->setThemeKey(m_originalSettings.themeKey);
-        m_settings->setUiFontSize(m_originalSettings.uiFontSize);
-        m_settings->setRestoreLastLibrary(m_originalSettings.restoreLastLibrary);
-        m_settings->setRestoreOpenTabs(m_originalSettings.restoreOpenTabs);
-        m_settings->setAutosaveSeconds(m_originalSettings.autosaveSeconds);
-        m_settings->setLastLibraryPath(m_originalSettings.lastLibraryPath);
+        m_settings->setThemeKey(m_appliedSettings.themeKey);
+        m_settings->setUiFontSize(m_appliedSettings.uiFontSize);
+        m_settings->setRestoreLastLibrary(m_appliedSettings.restoreLastLibrary);
+        m_settings->setRestoreOpenTabs(m_appliedSettings.restoreOpenTabs);
+        m_settings->setAutosaveSeconds(m_appliedSettings.autosaveSeconds);
+        m_settings->setLastLibraryPath(m_appliedSettings.lastLibraryPath);
     }
     if (m_themes) {
         ThemeId original = ThemeId::ModernLight;
-        if (ThemeManager::fromKey(m_originalThemeKey, &original))
+        if (ThemeManager::fromKey(m_appliedSettings.themeKey, &original))
             m_themes->setCurrentTheme(original, qApp);
     }
     QFont font = QApplication::font();
-    font.setPointSize(m_originalFontSize);
+    font.setPointSize(m_appliedSettings.uiFontSize);
     QApplication::setFont(font);
     reject();
 }

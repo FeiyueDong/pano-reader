@@ -12,6 +12,8 @@ namespace pano {
 SettingsManager::SettingsManager(QObject *parent)
     : QObject(parent)
 {
+    QString toolWarning;
+    m_toolPresets.load(&toolWarning);
 }
 
 QString SettingsManager::configDirectory() const
@@ -47,6 +49,11 @@ void SettingsManager::load()
             m_settings.restoreOpenTabs = root.value(QStringLiteral("restore_open_tabs")).toBool(true);
             m_settings.autosaveSeconds =
                 qBound(1, root.value(QStringLiteral("autosave_seconds")).toInt(2), 30);
+            ImportMode mode = ImportMode::Copy;
+            importModeFromString(root.value(QStringLiteral("default_import_mode")).toString(), &mode);
+            m_settings.defaultImportMode = mode;
+            m_settings.libraryCoverView =
+                root.value(QStringLiteral("library_cover_view")).toBool(true);
         }
     }
 
@@ -57,6 +64,22 @@ void SettingsManager::load()
             && root.value(QStringLiteral("schema_version")).toInt(-1) == 1) {
             m_settings.lastLibraryPath = root.value(QStringLiteral("last_library")).toString();
             m_settings.lastBookId = root.value(QStringLiteral("last_book_id")).toString();
+            m_settings.libraryNavVisible =
+                root.value(QStringLiteral("library_nav_visible")).toBool(true);
+            m_settings.libraryInfoVisible =
+                root.value(QStringLiteral("library_info_visible")).toBool(true);
+            m_settings.libraryNavWidth =
+                qBound(160, root.value(QStringLiteral("library_nav_width")).toInt(230), 420);
+            m_settings.libraryInfoWidth =
+                qBound(240, root.value(QStringLiteral("library_info_width")).toInt(340), 560);
+            m_settings.readerLeftVisible =
+                root.value(QStringLiteral("reader_left_visible")).toBool(true);
+            m_settings.readerRightVisible =
+                root.value(QStringLiteral("reader_right_visible")).toBool(true);
+            m_settings.readerLeftWidth =
+                qBound(240, root.value(QStringLiteral("reader_left_width")).toInt(280), 460);
+            m_settings.readerRightWidth =
+                qBound(260, root.value(QStringLiteral("reader_right_width")).toInt(340), 560);
             m_settings.lastOpenBooks.clear();
             for (const QJsonValue &value : root.value(QStringLiteral("open_books")).toArray()) {
                 const QString id = value.toString();
@@ -81,6 +104,8 @@ bool SettingsManager::save(QString *errorMessage)
     general.insert(QStringLiteral("restore_last_library"), m_settings.restoreLastLibrary);
     general.insert(QStringLiteral("restore_open_tabs"), m_settings.restoreOpenTabs);
     general.insert(QStringLiteral("autosave_seconds"), m_settings.autosaveSeconds);
+    general.insert(QStringLiteral("default_import_mode"), importModeToString(m_settings.defaultImportMode));
+    general.insert(QStringLiteral("library_cover_view"), m_settings.libraryCoverView);
 
     QJsonObject workspace;
     workspace.insert(QStringLiteral("format"), QStringLiteral("pano-settings-workspace"));
@@ -91,6 +116,14 @@ bool SettingsManager::save(QString *errorMessage)
     for (const QString &bookId : m_settings.lastOpenBooks)
         openBooks.append(bookId);
     workspace.insert(QStringLiteral("open_books"), openBooks);
+    workspace.insert(QStringLiteral("library_nav_visible"), m_settings.libraryNavVisible);
+    workspace.insert(QStringLiteral("library_info_visible"), m_settings.libraryInfoVisible);
+    workspace.insert(QStringLiteral("library_nav_width"), m_settings.libraryNavWidth);
+    workspace.insert(QStringLiteral("library_info_width"), m_settings.libraryInfoWidth);
+    workspace.insert(QStringLiteral("reader_left_visible"), m_settings.readerLeftVisible);
+    workspace.insert(QStringLiteral("reader_right_visible"), m_settings.readerRightVisible);
+    workspace.insert(QStringLiteral("reader_left_width"), m_settings.readerLeftWidth);
+    workspace.insert(QStringLiteral("reader_right_width"), m_settings.readerRightWidth);
 
     return writeJsonObjectAtomic(generalFilePath(), general, errorMessage)
         && writeJsonObjectAtomic(workspaceFilePath(), workspace, errorMessage);
@@ -151,6 +184,40 @@ void SettingsManager::setLastBookId(const QString &bookId)
 void SettingsManager::setLastOpenBooks(const QStringList &bookIds)
 {
     m_settings.lastOpenBooks = bookIds;
+}
+
+void SettingsManager::setDefaultImportMode(ImportMode mode)
+{
+    if (m_settings.defaultImportMode == mode)
+        return;
+    m_settings.defaultImportMode = mode;
+    emit settingsChanged();
+}
+
+void SettingsManager::setLibraryCoverView(bool cover)
+{
+    if (m_settings.libraryCoverView == cover)
+        return;
+    m_settings.libraryCoverView = cover;
+    emit settingsChanged();
+}
+
+void SettingsManager::setLibraryPanelState(bool navVisible, bool infoVisible,
+                                           int navWidth, int infoWidth)
+{
+    m_settings.libraryNavVisible = navVisible;
+    m_settings.libraryInfoVisible = infoVisible;
+    m_settings.libraryNavWidth = navWidth;
+    m_settings.libraryInfoWidth = infoWidth;
+}
+
+void SettingsManager::setReaderPanelState(bool leftVisible, bool rightVisible,
+                                          int leftWidth, int rightWidth)
+{
+    m_settings.readerLeftVisible = leftVisible;
+    m_settings.readerRightVisible = rightVisible;
+    m_settings.readerLeftWidth = leftWidth;
+    m_settings.readerRightWidth = rightWidth;
 }
 
 } // namespace pano

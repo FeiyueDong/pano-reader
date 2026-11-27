@@ -499,6 +499,39 @@ bool LibraryManager::renameShelf(const QString &shelfId, const QString &name, QS
     return true;
 }
 
+bool LibraryManager::moveShelf(const QString &shelfId, const QString &newParentId,
+                                QString *errorMessage)
+{
+    ShelfRecord *shelf = m_data.shelf(shelfId);
+    if (!shelf) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("书架不存在。");
+        return false;
+    }
+    if (shelf->parentId == newParentId)
+        return true;
+    if (!newParentId.isEmpty()) {
+        if (!m_data.shelf(newParentId)) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("目标书架不存在。");
+            return false;
+        }
+        if (shelfIsDescendant(shelfId, newParentId)) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("不能把书架移动到它自身或其子书架下。");
+            return false;
+        }
+    }
+    const QString oldParent = shelf->parentId;
+    shelf->parentId = newParentId;
+    if (!persistShelves(errorMessage)) {
+        shelf->parentId = oldParent;
+        return false;
+    }
+    emit libraryChanged();
+    return true;
+}
+
 bool LibraryManager::deleteShelf(const QString &shelfId, QString *errorMessage)
 {
     const int index = m_data.shelfIndex(shelfId);

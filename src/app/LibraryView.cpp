@@ -1,7 +1,10 @@
 #include "app/LibraryView.h"
 
+#include <QApplication>
 #include <QComboBox>
+#include <QDrag>
 #include <QDragEnterEvent>
+#include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QMimeData>
 #include <QUrl>
@@ -16,15 +19,19 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QPainter>
 #include <QPushButton>
 #include <QSplitter>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
 #include <algorithm>
 
+#include "app/IconManager.h"
 #include "library/LibraryManager.h"
+#include "settings/SettingsManager.h"
 
 namespace pano {
 
@@ -39,32 +46,70 @@ QString humanSize(qint64 bytes)
     return QStringLiteral("%1 MiB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1);
 }
 
-QIcon coverIcon(const BookInfo &book)
+QIcon coverIcon(const BookInfo &book, const QSize &target)
 {
-    QPixmap pixmap;
+    QPixmap source;
     if (!book.coverPath.isEmpty())
-        pixmap.load(book.coverPath);
-    if (pixmap.isNull()) {
-        pixmap = QPixmap(56, 76);
-        pixmap.fill(QColor(0xDCE4EF));
-        QPainter painter(&pixmap);
+        source.load(book.coverPath);
+    QPixmap canvas(target);
+    canvas.fill(Qt::transparent);
+    QPainter painter(&canvas);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    if (!source.isNull()) {
+        const QPixmap scaled = source.scaled(target, Qt::KeepAspectRatio,
+                                             Qt::SmoothTransformation);
+        const QPoint offset((target.width() - scaled.width()) / 2,
+                            (target.height() - scaled.height()) / 2);
+        painter.drawPixmap(offset, scaled);
+    } else {
+        painter.fillRect(canvas.rect(), QColor(0xDCE4EF));
         painter.setPen(QColor(0x4B5B70));
         QFont font = painter.font();
         font.setBold(true);
         painter.setFont(font);
-        painter.drawText(pixmap.rect().adjusted(4, 4, -4, -4),
+        painter.drawText(canvas.rect().adjusted(4, 4, -4, -4),
                          Qt::AlignCenter | Qt::TextWordWrap, book.title.left(12));
     }
-    return QIcon(pixmap.scaled(56, 76, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    painter.end();
+    return QIcon(canvas);
 }
+
+class BookListWidget : public QListWidget
+{
+public:
+    explicit BookListWidget(QWidget *parent = nullptr)
+        : QListWidget(parent)
+    {
+    }
+
+protected:
+    void startDrag(Qt::DropActions) override
+    {
+        QListWidgetItem *item = currentItem();
+        if (!item || item->data(Qt::UserRole).toString() != QStringLiteral("book"))
+            return;
+        auto *mime = new QMimeData;
+        mime->setData(QStringLiteral("application/x-pano-book"),
+                      item->data(Qt::UserRole + 1).toString().toUtf8());
+        auto *drag = new QDrag(this);
+        drag->setMimeData(mime);
+        const QPixmap pixmap = item->icon().pixmap(48, 64);
+        if (!pixmap.isNull())
+            drag->setPixmap(pixmap);
+        drag->exec(Qt::CopyAction | Qt::MoveAction, Qt::MoveAction);
+    }
+};
 
 } // namespace
 
-LibraryView::LibraryView(LibraryManager *manager, QWidget *parent)
+LibraryView::LibraryView(LibraryManager *manager, SettingsManager *settings, QWidget *parent)
     : QWidget(parent)
     , m_manager(manager)
+    , m_settings(settings)
 {
     setAcceptDrops(true);
+    if (m_settings)
+        m_coverMode = m_settings->settings().libraryCoverView;
     buildUi();
     if (m_manager) {
         connect(m_manager, &LibraryManager::libraryChanged, this, &LibraryView::refresh);
@@ -80,50 +125,86 @@ void LibraryView::buildUi()
     layout->setSpacing(8);
 
     auto *top = new QHBoxLayout;
-    auto *importButton = new QPushButton(tr("导入 PDF…"), this);
-    connect(importButton, &QPushButton::clicked, this, &LibraryView::importBooks);
-    top->addWidget(importButton);
+    m_importButton = new QToolButton(this);
+    m_importButton->setIcon(IconManager::instance()->icon(QStringLiteral("file-plus")));
+    m_importButton->setToolTip(tr("导入 PDF"));
+    connect(m_importButton, &QToolButton::clicked, this, &LibraryView::importBooks);
+    top->addWidget(m_importButton);
 
-    m_newShelfButton = new QPushButton(tr("新建书架"), this);
-    connect(m_newShelfButton, &QPushButton::clicked, this, &LibraryView::createShelf);
+    m_newShelfButton = new QToolButton(this);
+    m_newShelfButton->setIcon(IconManager::instance()->icon(QStringLiteral("folder-plus")));
+    m_newShelfButton->setToolTip(tr("新建书架"));
+    connect(m_newShelfButton, &QToolButton::clicked, this, &LibraryView::createShelf);
     top->addWidget(m_newShelfButton);
 
-    m_renameShelfButton = new QPushButton(tr("重命名书架"), this);
-    connect(m_renameShelfButton, &QPushButton::clicked, this, &LibraryView::renameShelf);
+    m_renameShelfButton = new QToolButton(this);
+    m_renameShelfButton->setIcon(IconManager::instance()->icon(QStringLiteral("pen-line")));
+    m_renameShelfButton->setToolTip(tr("重命名书架"));
+    connect(m_renameShelfButton, &QToolButton::clicked, this, &LibraryView::renameShelf);
     top->addWidget(m_renameShelfButton);
 
-    m_deleteShelfButton = new QPushButton(tr("删除书架"), this);
-    connect(m_deleteShelfButton, &QPushButton::clicked, this, &LibraryView::deleteShelf);
+    m_deleteShelfButton = new QToolButton(this);
+    m_deleteShelfButton->setIcon(IconManager::instance()->icon(QStringLiteral("trash-2")));
+    m_deleteShelfButton->setToolTip(tr("删除书架"));
+    connect(m_deleteShelfButton, &QToolButton::clicked, this, &LibraryView::deleteShelf);
     top->addWidget(m_deleteShelfButton);
 
-    top->addStretch(1);
+    for (QToolButton *button : {m_importButton, m_newShelfButton, m_renameShelfButton,
+                                m_deleteShelfButton}) {
+        button->setIconSize(QSize(20, 20));
+        button->setStyleSheet(QStringLiteral(
+            "QToolButton { border: 1px solid palette(mid); border-radius: 4px; padding: 3px; }"
+            "QToolButton:hover { background: palette(midlight); }"));
+    }
+
+    top->addSpacing(8);
+    m_breadcrumb = new QLabel(this);
+    m_breadcrumb->setTextFormat(Qt::RichText);
+    m_breadcrumb->setTextInteractionFlags(Qt::LinksAccessibleByMouse);
+    connect(m_breadcrumb, &QLabel::linkActivated, this, &LibraryView::onBreadcrumbActivated);
+    top->addWidget(m_breadcrumb, 1);
+
     m_search = new QLineEdit(this);
     m_search->setPlaceholderText(tr("搜索书名、作者…"));
     m_search->setClearButtonEnabled(true);
-    m_search->setMinimumWidth(220);
+    m_search->setMinimumWidth(180);
     connect(m_search, &QLineEdit::textChanged, this, &LibraryView::refreshBooks);
     top->addWidget(m_search);
 
     m_sort = new QComboBox(this);
     m_sort->addItem(tr("按书名"), QStringLiteral("title"));
+    m_sort->addItem(tr("按作者"), QStringLiteral("author"));
     m_sort->addItem(tr("按导入时间"), QStringLiteral("imported"));
+    m_sort->addItem(tr("最近阅读"), QStringLiteral("recent"));
     m_sort->addItem(tr("收藏优先"), QStringLiteral("favorite"));
     connect(m_sort, &QComboBox::currentIndexChanged, this, &LibraryView::refreshBooks);
     top->addWidget(m_sort);
+
+    m_viewToggle = new QToolButton(this);
+    m_viewToggle->setCheckable(true);
+    m_viewToggle->setChecked(m_coverMode);
+    m_viewToggle->setToolTip(tr("切换封面 / 列表视图"));
+    m_viewToggle->setIcon(IconManager::instance()->icon(
+        m_coverMode ? QStringLiteral("layout-grid") : QStringLiteral("list")));
+    connect(m_viewToggle, &QToolButton::toggled, this, &LibraryView::onViewModeToggled);
+    top->addWidget(m_viewToggle);
     layout->addLayout(top);
 
-    auto *splitter = new QSplitter(Qt::Horizontal, this);
-    m_navigation = new QTreeWidget(splitter);
+    m_splitter = new QSplitter(Qt::Horizontal, this);
+    m_navigation = new QTreeWidget(m_splitter);
     m_navigation->setHeaderHidden(true);
     m_navigation->setMinimumWidth(180);
     m_navigation->setMaximumWidth(280);
     connect(m_navigation, &QTreeWidget::currentItemChanged, this,
             &LibraryView::onNavigationChanged);
 
-    m_books = new QListWidget(splitter);
-    m_books->setIconSize(QSize(56, 76));
+    m_books = new BookListWidget(m_splitter);
+    m_books->setDragEnabled(true);
+    m_books->setDragDropMode(QAbstractItemView::DragOnly);
+    m_books->setDefaultDropAction(Qt::MoveAction);
     m_books->setSpacing(4);
     m_books->setAlternatingRowColors(true);
+    m_books->setUniformItemSizes(false);
     connect(m_books, &QListWidget::currentRowChanged, this, &LibraryView::onBookSelectionChanged);
     connect(m_books, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) {
         onBookActivated();
@@ -136,15 +217,23 @@ void LibraryView::buildUi()
             &LibraryView::showBookContextMenu);
 
     m_infoPane = buildInfoPane();
-    splitter->addWidget(m_navigation);
-    splitter->addWidget(m_books);
-    splitter->addWidget(m_infoPane);
-    splitter->setStretchFactor(0, 0);
-    splitter->setStretchFactor(1, 1);
-    splitter->setStretchFactor(2, 1);
-    splitter->setSizes({220, 420, 360});
-    layout->addWidget(splitter, 1);
+    m_splitter->addWidget(m_navigation);
+    m_splitter->addWidget(m_books);
+    m_splitter->addWidget(m_infoPane);
+    m_splitter->setStretchFactor(0, 0);
+    m_splitter->setStretchFactor(1, 1);
+    m_splitter->setStretchFactor(2, 0);
+    m_splitter->setChildrenCollapsible(false);
+    if (m_settings) {
+        m_splitter->setSizes({m_settings->settings().libraryNavWidth, 520,
+                              m_settings->settings().libraryInfoWidth});
+    } else {
+        m_splitter->setSizes({230, 520, 340});
+    }
+    connect(m_splitter, &QSplitter::splitterMoved, this, &LibraryView::onSplitterMoved);
+    layout->addWidget(m_splitter, 1);
 
+    applyViewMode(m_coverMode);
     rebuildNavigation();
 }
 
@@ -232,12 +321,16 @@ void LibraryView::rebuildNavigation()
 
     auto *all = new QTreeWidgetItem(m_navigation, {tr("全部书籍")});
     all->setData(0, Qt::UserRole, QStringLiteral("all"));
+    all->setIcon(0, IconManager::instance()->icon(QStringLiteral("book-open")));
     auto *favorites = new QTreeWidgetItem(m_navigation, {tr("收藏")});
     favorites->setData(0, Qt::UserRole, QStringLiteral("favorites"));
+    favorites->setIcon(0, IconManager::instance()->icon(QStringLiteral("star")));
     auto *shelvesRoot = new QTreeWidgetItem(m_navigation, {tr("书架")});
     shelvesRoot->setData(0, Qt::UserRole, QStringLiteral("shelves-root"));
+    shelvesRoot->setIcon(0, IconManager::instance()->icon(QStringLiteral("folder")));
     auto *trash = new QTreeWidgetItem(m_navigation, {tr("回收站")});
     trash->setData(0, Qt::UserRole, QStringLiteral("trash"));
+    trash->setIcon(0, IconManager::instance()->icon(QStringLiteral("trash-2")));
 
     if (m_manager) {
         QHash<QString, QTreeWidgetItem *> shelfItems;
@@ -245,6 +338,7 @@ void LibraryView::rebuildNavigation()
             auto *item = new QTreeWidgetItem({shelf.name});
             item->setData(0, Qt::UserRole, QStringLiteral("shelf"));
             item->setData(0, Qt::UserRole + 1, shelf.id);
+            item->setIcon(0, IconManager::instance()->icon(QStringLiteral("folder")));
             shelfItems.insert(shelf.id, item);
         }
         // Attach after all items exist, so parents can themselves be nested.
@@ -280,6 +374,7 @@ void LibraryView::rebuildNavigation()
     const bool shelfSelected = target->data(0, Qt::UserRole).toString() == QStringLiteral("shelf");
     m_renameShelfButton->setEnabled(shelfSelected);
     m_deleteShelfButton->setEnabled(shelfSelected);
+    updateBreadcrumb();
 }
 
 LibraryView::Navigation LibraryView::currentNavigation() const
@@ -300,6 +395,161 @@ LibraryView::Navigation LibraryView::currentNavigation() const
     return nav;
 }
 
+QString LibraryView::currentShelfId() const
+{
+    const Navigation nav = currentNavigation();
+    return nav.kind == Navigation::Shelf ? nav.shelfId : QString();
+}
+
+QString LibraryView::shelfPath(const QString &shelfId) const
+{
+    QStringList parts;
+    QString id = shelfId;
+    QSet<QString> seen;
+    while (!id.isEmpty() && !seen.contains(id)) {
+        seen.insert(id);
+        const ShelfRecord *shelf = m_manager ? m_manager->data().shelf(id) : nullptr;
+        if (!shelf)
+            break;
+        parts.prepend(shelf->name);
+        id = shelf->parentId;
+    }
+    return parts.join(QStringLiteral(" / "));
+}
+
+void LibraryView::updateBreadcrumb()
+{
+    if (!m_breadcrumb)
+        return;
+    const Navigation nav = currentNavigation();
+    const QString home = QStringLiteral("<a href=\"all\">全部书籍</a>");
+    QString text;
+    if (nav.kind == Navigation::Favorites) {
+        text = home + QStringLiteral(" / <a href=\"favorites\">收藏</a>");
+    } else if (nav.kind == Navigation::Trash) {
+        text = home + QStringLiteral(" / <a href=\"trash\">回收站</a>");
+    } else if (nav.kind == Navigation::Shelf) {
+        text = home + QStringLiteral(" / <a href=\"shelves\">书架</a>");
+        QStringList ids;
+        QString id = nav.shelfId;
+        QSet<QString> seen;
+        while (!id.isEmpty() && !seen.contains(id)) {
+            seen.insert(id);
+            ids.prepend(id);
+            const ShelfRecord *shelf = m_manager ? m_manager->data().shelf(id) : nullptr;
+            if (!shelf)
+                break;
+            id = shelf->parentId;
+        }
+        for (const QString &shelfId : ids) {
+            const ShelfRecord *shelf = m_manager->data().shelf(shelfId);
+            if (!shelf)
+                continue;
+            text += QStringLiteral(" / <a href=\"shelf:%1\">%2</a>")
+                        .arg(shelfId.toHtmlEscaped(), shelf->name.toHtmlEscaped());
+        }
+    } else {
+        text = QStringLiteral("<b>全部书籍</b>");
+    }
+    m_breadcrumb->setText(text);
+}
+
+void LibraryView::onBreadcrumbActivated(const QString &target)
+{
+    if (target == QStringLiteral("all")) {
+        for (int i = 0; i < m_navigation->topLevelItemCount(); ++i) {
+            if (m_navigation->topLevelItem(i)->data(0, Qt::UserRole).toString()
+                == QStringLiteral("all")) {
+                m_navigation->setCurrentItem(m_navigation->topLevelItem(i));
+                return;
+            }
+        }
+    } else if (target == QStringLiteral("favorites")) {
+        for (int i = 0; i < m_navigation->topLevelItemCount(); ++i) {
+            if (m_navigation->topLevelItem(i)->data(0, Qt::UserRole).toString()
+                == QStringLiteral("favorites")) {
+                m_navigation->setCurrentItem(m_navigation->topLevelItem(i));
+                return;
+            }
+        }
+    } else if (target == QStringLiteral("trash")) {
+        for (int i = 0; i < m_navigation->topLevelItemCount(); ++i) {
+            if (m_navigation->topLevelItem(i)->data(0, Qt::UserRole).toString()
+                == QStringLiteral("trash")) {
+                m_navigation->setCurrentItem(m_navigation->topLevelItem(i));
+                return;
+            }
+        }
+    } else if (target == QStringLiteral("shelves")) {
+        for (int i = 0; i < m_navigation->topLevelItemCount(); ++i) {
+            if (m_navigation->topLevelItem(i)->data(0, Qt::UserRole).toString()
+                == QStringLiteral("shelves-root")) {
+                m_navigation->setCurrentItem(m_navigation->topLevelItem(i));
+                return;
+            }
+        }
+    } else if (target.startsWith(QStringLiteral("shelf:"))) {
+        selectShelf(target.mid(6));
+    }
+}
+
+void LibraryView::selectShelf(const QString &shelfId)
+{
+    const QList<QTreeWidgetItem *> items =
+        m_navigation->findItems(QString(), Qt::MatchContains | Qt::MatchRecursive);
+    for (QTreeWidgetItem *item : items) {
+        if (item->data(0, Qt::UserRole + 1).toString() == shelfId) {
+            m_navigation->setCurrentItem(item);
+            return;
+        }
+    }
+}
+
+void LibraryView::onViewModeToggled(bool cover)
+{
+    applyViewMode(cover);
+    if (m_settings)
+        m_settings->setLibraryCoverView(cover);
+    refreshBooks();
+}
+
+void LibraryView::onSplitterMoved()
+{
+    if (!m_settings || !m_splitter)
+        return;
+    const QList<int> sizes = m_splitter->sizes();
+    if (sizes.size() == 3)
+        m_settings->setLibraryPanelState(true, true, sizes.at(0), sizes.at(2));
+}
+
+void LibraryView::applyViewMode(bool cover)
+{
+    m_coverMode = cover;
+    if (!m_books)
+        return;
+    if (m_viewToggle) {
+        QSignalBlocker blocker(m_viewToggle);
+        m_viewToggle->setChecked(cover);
+        m_viewToggle->setIcon(IconManager::instance()->icon(
+            cover ? QStringLiteral("layout-grid") : QStringLiteral("list")));
+    }
+    if (cover) {
+        m_books->setViewMode(QListView::IconMode);
+        m_books->setIconSize(QSize(112, 150));
+        m_books->setGridSize(QSize(138, 188));
+        m_books->setWordWrap(true);
+        m_books->setResizeMode(QListView::Adjust);
+        m_books->setMovement(QListView::Static);
+    } else {
+        m_books->setViewMode(QListView::ListMode);
+        m_books->setIconSize(QSize(44, 58));
+        m_books->setGridSize(QSize());
+        m_books->setWordWrap(false);
+        m_books->setResizeMode(QListView::Adjust);
+        m_books->setMovement(QListView::Static);
+    }
+}
+
 void LibraryView::onNavigationChanged(QTreeWidgetItem *current, QTreeWidgetItem *)
 {
     if (!current)
@@ -308,6 +558,7 @@ void LibraryView::onNavigationChanged(QTreeWidgetItem *current, QTreeWidgetItem 
     const bool shelfSelected = kind == QStringLiteral("shelf");
     m_renameShelfButton->setEnabled(shelfSelected);
     m_deleteShelfButton->setEnabled(shelfSelected);
+    updateBreadcrumb();
     refreshBooks();
 }
 
@@ -318,10 +569,18 @@ void LibraryView::refreshBooks()
     const QString keepId = selectedBookId();
     const Navigation nav = currentNavigation();
     const QString query = m_search ? m_search->text().trimmed() : QString();
-    QVector<BookInfo> books = m_manager->books(true);
 
+    QVector<ShelfRecord> folders;
+    QVector<BookInfo> books = m_manager->books(true);
     QVector<BookInfo> filtered;
     filtered.reserve(books.size());
+
+    const ShelfRecord *selectedShelf = nav.kind == Navigation::Shelf
+        ? m_manager->data().shelf(nav.shelfId) : nullptr;
+    QSet<QString> directBookIds;
+    if (selectedShelf)
+        directBookIds = QSet<QString>(selectedShelf->bookIds.begin(), selectedShelf->bookIds.end());
+
     for (const BookInfo &book : books) {
         if (nav.kind == Navigation::Trash) {
             if (!book.deleted)
@@ -331,31 +590,8 @@ void LibraryView::refreshBooks()
         }
         if (nav.kind == Navigation::Favorites && !book.favorite)
             continue;
-        if (nav.kind == Navigation::Shelf) {
-            QSet<QString> shelfIds;
-            QSet<QString> pending{nav.shelfId};
-            while (!pending.isEmpty()) {
-                const QString id = *pending.begin();
-                pending.remove(id);
-                if (shelfIds.contains(id))
-                    continue;
-                shelfIds.insert(id);
-                for (const ShelfRecord &child : m_manager->data().shelves) {
-                    if (child.parentId == id)
-                        pending.insert(child.id);
-                }
-            }
-            bool belongs = false;
-            for (const QString &shelfId : shelfIds) {
-                const ShelfRecord *shelf = m_manager->data().shelf(shelfId);
-                if (shelf && shelf->bookIds.contains(book.id)) {
-                    belongs = true;
-                    break;
-                }
-            }
-            if (!belongs)
-                continue;
-        }
+        if (nav.kind == Navigation::Shelf && !directBookIds.contains(book.id))
+            continue;
         if (!query.isEmpty()
             && !book.title.contains(query, Qt::CaseInsensitive)
             && !book.author.contains(query, Qt::CaseInsensitive))
@@ -363,31 +599,63 @@ void LibraryView::refreshBooks()
         filtered.append(book);
     }
 
+    if (nav.kind == Navigation::Shelf) {
+        for (const ShelfRecord &shelf : m_manager->data().shelves) {
+            if (shelf.parentId != nav.shelfId)
+                continue;
+            if (!query.isEmpty() && !shelf.name.contains(query, Qt::CaseInsensitive))
+                continue;
+            folders.append(shelf);
+        }
+    }
+
     const QString sortKey = m_sort ? m_sort->currentData().toString() : QStringLiteral("title");
-    std::sort(filtered.begin(), filtered.end(), [sortKey](const BookInfo &a, const BookInfo &b) {
+    std::sort(filtered.begin(), filtered.end(), [this, sortKey](const BookInfo &a, const BookInfo &b) {
         if (sortKey == QStringLiteral("favorite") && a.favorite != b.favorite)
             return a.favorite;
         if (sortKey == QStringLiteral("imported"))
             return a.importedAt > b.importedAt;
+        if (sortKey == QStringLiteral("author"))
+            return a.author.localeAwareCompare(b.author) < 0;
+        if (sortKey == QStringLiteral("recent"))
+            return m_manager->data().history.value(a.id) > m_manager->data().history.value(b.id);
         return a.title.localeAwareCompare(b.title) < 0;
+    });
+    std::sort(folders.begin(), folders.end(), [](const ShelfRecord &a, const ShelfRecord &b) {
+        return a.name.localeAwareCompare(b.name) < 0;
     });
 
     QSignalBlocker blocker(m_books);
     m_books->clear();
+    for (const ShelfRecord &shelf : folders) {
+        auto *item = new QListWidgetItem(
+            IconManager::instance()->icon(QStringLiteral("folder")), shelf.name);
+        item->setData(Qt::UserRole, QStringLiteral("shelf"));
+        item->setData(Qt::UserRole + 1, shelf.id);
+        item->setSizeHint(m_coverMode ? QSize(138, 76) : QSize(0, 52));
+        item->setToolTip(tr("打开书架：%1").arg(shelf.name));
+        m_books->addItem(item);
+    }
     for (const BookInfo &book : filtered) {
-        auto *item = new QListWidgetItem(coverIcon(book),
-                                         QStringLiteral("%1\n%2").arg(book.title, book.author.isEmpty()
-                                                                                     ? tr("未知作者")
-                                                                                     : book.author));
-        item->setData(Qt::UserRole, book.id);
-        item->setData(Qt::UserRole + 1, book.deleted);
-        item->setSizeHint(QSize(0, 84));
+        const QString text = m_coverMode
+            ? QStringLiteral("%1\n%2").arg(book.title,
+                                             book.author.isEmpty() ? tr("未知作者") : book.author)
+            : QStringLiteral("%1 — %2").arg(book.title,
+                                              book.author.isEmpty() ? tr("未知作者") : book.author);
+        auto *item = new QListWidgetItem(coverIcon(book, m_coverMode ? QSize(112, 150) : QSize(44, 58)), text);
+        item->setData(Qt::UserRole, QStringLiteral("book"));
+        item->setData(Qt::UserRole + 1, book.id);
+        item->setData(Qt::UserRole + 2, book.deleted);
+        item->setSizeHint(m_coverMode ? QSize(138, 188) : QSize(0, 66));
         item->setToolTip(book.pdfPath);
+        if (book.deleted)
+            item->setText(text + QStringLiteral("\n") + tr("（回收站）"));
         m_books->addItem(item);
     }
     if (!keepId.isEmpty()) {
         for (int row = 0; row < m_books->count(); ++row) {
-            if (m_books->item(row)->data(Qt::UserRole).toString() == keepId) {
+            if (m_books->item(row)->data(Qt::UserRole).toString() == QStringLiteral("book")
+                && m_books->item(row)->data(Qt::UserRole + 1).toString() == keepId) {
                 m_books->setCurrentRow(row);
                 break;
             }
@@ -411,7 +679,9 @@ void LibraryView::refreshBooks()
 QString LibraryView::selectedBookId() const
 {
     const QListWidgetItem *item = m_books ? m_books->currentItem() : nullptr;
-    return item ? item->data(Qt::UserRole).toString() : QString();
+    if (!item || item->data(Qt::UserRole).toString() != QStringLiteral("book"))
+        return QString();
+    return item->data(Qt::UserRole + 1).toString();
 }
 
 BookInfo LibraryView::selectedBook() const
@@ -426,6 +696,27 @@ void LibraryView::onBookSelectionChanged()
 
 void LibraryView::refreshInfo()
 {
+    const QListWidgetItem *item = m_books ? m_books->currentItem() : nullptr;
+    if (item && item->data(Qt::UserRole).toString() == QStringLiteral("shelf")) {
+        const QString shelfId = item->data(Qt::UserRole + 1).toString();
+        const ShelfRecord *shelf = m_manager ? m_manager->data().shelf(shelfId) : nullptr;
+        m_cover->setPixmap(IconManager::instance()->icon(QStringLiteral("folder"), 96)
+                               .pixmap(96, 96));
+        m_title->setText(shelf ? shelf->name : tr("书架"));
+        m_author->clear();
+        m_meta->setText(tr("书架内容：%1 本；上级：%2")
+                            .arg(shelf ? shelf->bookIds.size() : 0)
+                            .arg(shelf && !shelf->parentId.isEmpty()
+                                     ? shelfPath(shelf->parentId) : tr("根书架")));
+        m_source->setText(tr("双击文件夹可进入子书架。"));
+        m_counts->clear();
+        for (QPushButton *button : {m_openButton, m_favoriteButton, m_shelfButton, m_trashButton,
+                                    m_restoreButton, m_deleteButton, m_sourceButton}) {
+            button->setEnabled(false);
+        }
+        return;
+    }
+
     const BookInfo book = selectedBook();
     const bool hasBook = !book.id.isEmpty();
     if (!hasBook) {
@@ -447,9 +738,13 @@ void LibraryView::refreshInfo()
                                       : cover.scaledToHeight(180, Qt::SmoothTransformation));
     m_title->setText(book.title);
     m_author->setText(book.author.isEmpty() ? tr("未知作者") : book.author);
-    m_meta->setText(tr("导入：%1\n大小：%2\n模式：%3")
+    const ReadingState reading = m_manager ? m_manager->readingState(book.id) : ReadingState();
+    QString readingText;
+    if (reading.valid)
+        readingText = tr("\n上次阅读：第 %1 页").arg(reading.pageIndex + 1);
+    m_meta->setText(tr("导入：%1\n大小：%2\n模式：%3%4")
                         .arg(book.importedAt.left(10), humanSize(book.sizeBytes),
-                             importModeDisplayName(book.mode)));
+                             importModeDisplayName(book.mode), readingText));
     if (book.sourceAvailable) {
         m_source->setText(tr("源文件：可用\n%1").arg(book.pdfPath));
     } else {
@@ -477,6 +772,11 @@ void LibraryView::refreshInfo()
 
 void LibraryView::onBookActivated()
 {
+    const QListWidgetItem *item = m_books ? m_books->currentItem() : nullptr;
+    if (item && item->data(Qt::UserRole).toString() == QStringLiteral("shelf")) {
+        selectShelf(item->data(Qt::UserRole + 1).toString());
+        return;
+    }
     const BookInfo book = selectedBook();
     if (book.id.isEmpty() || book.deleted)
         return;
@@ -497,8 +797,12 @@ bool LibraryView::askImportMode(ImportMode *mode)
 {
     const QStringList options{tr("复制到书库"), tr("引用原文件（不复制）")};
     bool accepted = false;
+    const int initial = m_settings
+            && m_settings->settings().defaultImportMode == ImportMode::Reference
+        ? 1
+        : 0;
     const QString choice = QInputDialog::getItem(this, tr("导入方式"), tr("选择导入方式："), options,
-                                                 0, false, &accepted);
+                                                 initial, false, &accepted);
     if (!accepted)
         return false;
     if (mode)
@@ -589,6 +893,8 @@ void LibraryView::moveToTrash()
         tr("将《%1》移入回收站？原 PDF 不会被删除，可随时恢复。").arg(book.title),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
     if (answer != QMessageBox::Yes)
+        return;
+    if (m_beforeTrash && !m_beforeTrash(book.id))
         return;
     QString error;
     if (!m_manager->moveToTrash(book.id, &error))
@@ -720,7 +1026,7 @@ void LibraryView::deleteShelf()
     if (!shelf)
         return;
     const auto answer = QMessageBox::question(
-        this, tr("删除书架"), tr("删除书架《%1》？书籍本身不会被删除。").arg(shelf->name),
+        this, tr("删除书架"), tr("删除书架《%1》？书籍本身不会被删除；直接子书架会移到上一级。").arg(shelf->name),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
     if (answer != QMessageBox::Yes)
         return;
@@ -730,6 +1036,88 @@ void LibraryView::deleteShelf()
         return;
     }
     refresh();
+}
+
+void LibraryView::moveShelfDialog()
+{
+    const Navigation nav = currentNavigation();
+    if (nav.kind != Navigation::Shelf || !m_manager)
+        return;
+    const ShelfRecord *selected = m_manager->data().shelf(nav.shelfId);
+    if (!selected)
+        return;
+    QStringList names{tr("根目录")};
+    QStringList ids{QString()};
+    for (const ShelfRecord &shelf : m_manager->data().shelves) {
+        if (shelf.id == selected->id)
+            continue;
+        bool descendant = false;
+        QString cursor = shelf.id;
+        while (!cursor.isEmpty()) {
+            if (cursor == selected->id) {
+                descendant = true;
+                break;
+            }
+            const ShelfRecord *parent = m_manager->data().shelf(cursor);
+            cursor = parent ? parent->parentId : QString();
+        }
+        if (descendant)
+            continue;
+        names.append(shelfPath(shelf.id));
+        ids.append(shelf.id);
+    }
+    bool accepted = false;
+    const QString chosen = QInputDialog::getItem(this, tr("移动书架"), tr("目标位置："),
+                                                  names, 0, false, &accepted);
+    if (!accepted)
+        return;
+    const int index = names.indexOf(chosen);
+    if (index < 0)
+        return;
+    QString error;
+    if (!m_manager->moveShelf(selected->id, ids.value(index), &error)) {
+        QMessageBox::warning(this, tr("移动书架失败"), error);
+        return;
+    }
+    refresh();
+    selectShelf(selected->id);
+}
+
+void LibraryView::showNavContextMenu(const QPoint &position)
+{
+    QTreeWidgetItem *item = m_navigation->itemAt(position);
+    if (!item)
+        return;
+    m_navigation->setCurrentItem(item);
+    const QString kind = item->data(0, Qt::UserRole).toString();
+    const QString shelfId = item->data(0, Qt::UserRole + 1).toString();
+    QMenu menu(this);
+    QAction *create = menu.addAction(tr("新建子书架…"));
+    create->setEnabled(kind == QStringLiteral("all") || kind == QStringLiteral("shelf"));
+    QAction *rename = nullptr;
+    QAction *remove = nullptr;
+    QAction *move = nullptr;
+    if (kind == QStringLiteral("shelf")) {
+        rename = menu.addAction(tr("重命名书架…"));
+        move = menu.addAction(tr("移动到书架…"));
+        remove = menu.addAction(tr("删除书架"));
+    }
+    QAction *chosen = menu.exec(m_navigation->viewport()->mapToGlobal(position));
+    if (!chosen)
+        return;
+    if (chosen == create) {
+        onNavigationChanged(m_navigation->currentItem(), nullptr);
+        createShelf();
+    } else if (rename && chosen == rename) {
+        selectShelf(shelfId);
+        renameShelf();
+    } else if (move && chosen == move) {
+        selectShelf(shelfId);
+        moveShelfDialog();
+    } else if (remove && chosen == remove) {
+        selectShelf(shelfId);
+        deleteShelf();
+    }
 }
 
 void LibraryView::showBookContextMenu(const QPoint &position)
@@ -772,7 +1160,8 @@ void LibraryView::showBookContextMenu(const QPoint &position)
 void LibraryView::selectBook(const QString &bookId)
 {
     for (int row = 0; row < m_books->count(); ++row) {
-        if (m_books->item(row)->data(Qt::UserRole).toString() == bookId) {
+        if (m_books->item(row)->data(Qt::UserRole).toString() == QStringLiteral("book")
+            && m_books->item(row)->data(Qt::UserRole + 1).toString() == bookId) {
             m_books->setCurrentRow(row);
             return;
         }
@@ -790,7 +1179,14 @@ void LibraryView::restoreExpandedState()
 
 void LibraryView::dragEnterEvent(QDragEnterEvent *event)
 {
-    if (!m_manager || !m_manager->isOpen() || !event->mimeData()->hasUrls())
+    if (!m_manager || !m_manager->isOpen())
+        return;
+    if (event->mimeData()->hasFormat(QStringLiteral("application/x-pano-book"))) {
+        event->setDropAction(Qt::MoveAction);
+        event->accept();
+        return;
+    }
+    if (!event->mimeData()->hasUrls())
         return;
     for (const QUrl &url : event->mimeData()->urls()) {
         if (url.isLocalFile()
@@ -802,10 +1198,71 @@ void LibraryView::dragEnterEvent(QDragEnterEvent *event)
     }
 }
 
+void LibraryView::dragMoveEvent(QDragMoveEvent *event)
+{
+    if (!m_manager || !m_manager->isOpen())
+        return;
+    if (event->mimeData()->hasFormat(QStringLiteral("application/x-pano-book"))) {
+        const QPoint pos = m_navigation->viewport()->mapFrom(this, event->position().toPoint());
+        if (m_navigation->itemAt(pos)) {
+            event->setDropAction(Qt::MoveAction);
+            event->accept();
+        }
+        return;
+    }
+    event->acceptProposedAction();
+}
+
 void LibraryView::dropEvent(QDropEvent *event)
 {
     if (!m_manager || !m_manager->isOpen())
         return;
+
+    if (event->mimeData()->hasFormat(QStringLiteral("application/x-pano-book"))) {
+        const QString bookId =
+            QString::fromUtf8(event->mimeData()->data(QStringLiteral("application/x-pano-book")));
+        const QPoint pos = m_navigation->viewport()->mapFrom(this, event->position().toPoint());
+        QTreeWidgetItem *target = m_navigation->itemAt(pos);
+        if (!target || bookId.isEmpty())
+            return;
+        const QString kind = target->data(0, Qt::UserRole).toString();
+        const QString targetShelf = target->data(0, Qt::UserRole + 1).toString();
+        const Navigation nav = currentNavigation();
+        const QString sourceShelf = nav.kind == Navigation::Shelf ? nav.shelfId : QString();
+        QString error;
+        bool ok = true;
+        if (kind == QStringLiteral("favorites")) {
+            ok = m_manager->setFavorite(bookId, true, &error);
+        } else if (kind == QStringLiteral("trash")) {
+            if (QMessageBox::question(this, tr("移入回收站"),
+                                      tr("把这本书记录移入回收站？源 PDF 不会被删除。"))
+                == QMessageBox::Yes) {
+                ok = (!m_beforeTrash || m_beforeTrash(bookId))
+                    && m_manager->moveToTrash(bookId, &error);
+            } else {
+                return;
+            }
+        } else if (kind == QStringLiteral("shelf")) {
+            const bool additive = event->keyboardModifiers().testFlag(Qt::ControlModifier);
+            if (!additive && !sourceShelf.isEmpty() && sourceShelf != targetShelf)
+                ok = m_manager->removeBookFromShelf(sourceShelf, bookId, &error);
+            if (ok)
+                ok = m_manager->addBookToShelf(targetShelf, bookId, &error);
+        } else {
+            return;
+        }
+        if (!ok) {
+            setStatus(error);
+            QMessageBox::warning(this, tr("操作失败"), error);
+            return;
+        }
+        event->acceptProposedAction();
+        refresh();
+        if (kind == QStringLiteral("shelf"))
+            selectShelf(targetShelf);
+        return;
+    }
+
     QStringList paths;
     for (const QUrl &url : event->mimeData()->urls()) {
         if (!url.isLocalFile())

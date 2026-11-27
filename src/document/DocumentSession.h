@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QByteArray>
 #include <QObject>
 #include <QPointF>
 #include <QString>
@@ -12,6 +13,8 @@ namespace pano {
 
 class LibraryManager;
 class PdfView;
+class SettingsManager;
+class ToolPresets;
 class ReaderWorkspace;
 
 // One open book: owns the reader widget, the annotation document and the
@@ -22,7 +25,8 @@ class DocumentSession : public QObject
     Q_OBJECT
 
 public:
-    DocumentSession(LibraryManager *manager, const BookInfo &book, QObject *parent = nullptr);
+    DocumentSession(LibraryManager *manager, const BookInfo &book, SettingsManager *settings,
+                    QObject *parent = nullptr);
     ~DocumentSession() override;
 
     bool load(QString *errorMessage);
@@ -36,6 +40,8 @@ public:
     BookInfo book() const { return m_book; }
     PdfView *view() const;
     ReaderWorkspace *workspace() const { return m_workspace; }
+    SettingsManager *settings() const { return m_settings; }
+    ToolPresets *toolPresets() const;
     QString assetsDirectory() const;
     QString bookDirectory() const;
 
@@ -61,22 +67,28 @@ private slots:
     void onPageChanged(int pageIndex);
     void onZoomChanged(qreal zoom);
     void onRotationChanged(int degrees);
+    void scheduleReadingSave();
 
 private:
     void captureReadingState();
     void saveReadingState();
+    QByteArray annotationsFingerprint() const;
+
 
     LibraryManager *m_manager = nullptr;
+    SettingsManager *m_settings = nullptr;
     BookInfo m_book;
     ReaderWorkspace *m_workspace = nullptr;
     QTimer *m_autosaveTimer = nullptr;
     QTimer *m_maxTimer = nullptr;
+    QTimer *m_readingTimer = nullptr;
     bool m_loaded = false;
     bool m_dirty = false;
     bool m_loading = false;
     bool m_autosaveActive = false;
     ZoomMode m_zoomMode = ZoomMode::Fixed;
     int m_autosaveDelayMs = 2000;
+    QByteArray m_annotationsFingerprint;
 };
 
 } // namespace pano

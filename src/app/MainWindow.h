@@ -79,6 +79,7 @@ private:
     void addReaderTab(DocumentSession *session);
     void updateOpenTabs();
     bool closeAllSessions(bool prompt);
+    bool closeSessionForBook(const QString &bookId);
     void setShortcutScope(QWidget *view);
     bool saveSession(DocumentSession *session, bool promptOnFailure);
     void updateTabTitle(DocumentSession *session);

@@ -83,6 +83,14 @@ int main(int argc, char **argv)
           QStringLiteral("add book to grandchild shelf: %1").arg(error));
     check(manager.data().shelf(shelfC) && manager.data().shelf(shelfC)->bookIds.contains(bookId),
           QStringLiteral("shelf membership stored"));
+    check(manager.moveShelf(shelfC, QString(), &error),
+          QStringLiteral("move shelf to root: %1").arg(error));
+    check(manager.data().shelf(shelfC) && manager.data().shelf(shelfC)->parentId.isEmpty(),
+          QStringLiteral("shelf parent cleared after move"));
+    check(manager.moveShelf(shelfC, shelfB, &error),
+          QStringLiteral("move shelf under parent: %1").arg(error));
+    check(!manager.moveShelf(shelfA, shelfC, &error),
+          QStringLiteral("cycle move rejected"));
     check(manager.deleteShelf(shelfB, &error), QStringLiteral("delete middle shelf: %1").arg(error));
     check(manager.data().shelf(shelfC) && manager.data().shelf(shelfC)->parentId == shelfA,
           QStringLiteral("grandchild promoted to deleted shelf parent"));

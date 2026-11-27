@@ -76,8 +76,10 @@ NotePanel::NotePanel(QWidget *parent)
     connect(m_imageButton, &QPushButton::clicked, this, &NotePanel::imageRequested);
     connect(m_captureButton, &QPushButton::clicked, this, &NotePanel::captureRequested);
     connect(m_editor, &QPlainTextEdit::textChanged, this, [this] {
-        if (m_editing)
+        if (m_editing) {
             m_previewTimer->start();
+            emit contentChanged();
+        }
     });
 
     setEditable(false);

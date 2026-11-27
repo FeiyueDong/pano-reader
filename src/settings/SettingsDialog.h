@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDialog>
+#include <QHash>
 
 #include "annotation/Annotation.h"
 #include "settings/SettingsManager.h"
@@ -45,6 +46,9 @@ private:
     QWidget *buildShortcutsTab();
     void loadValues();
     void applyFont();
+    void loadPresetEditor(const QString &toolId);
+    void storePresetEditor();
+    bool flushPresetEdits();
 
     SettingsManager *m_settings = nullptr;
     ThemeManager *m_themes = nullptr;
@@ -55,13 +59,20 @@ private:
     QCheckBox *m_restoreTabs = nullptr;
     QCheckBox *m_restoreLibrary = nullptr;
     QSpinBox *m_autosaveSpin = nullptr;
+    QComboBox *m_importModeCombo = nullptr;
     QPushButton *m_strokeButton = nullptr;
     QDoubleSpinBox *m_widthSpin = nullptr;
     QSpinBox *m_opacitySpin = nullptr;
     QComboBox *m_blendCombo = nullptr;
+    QComboBox *m_presetToolCombo = nullptr;
+    QPushButton *m_presetResetButton = nullptr;
+    QHash<QString, AnnotationStyle> m_presetEdits;
+    QString m_currentPresetTool;
     QString m_originalThemeKey;
     int m_originalFontSize = 10;
     AppSettings m_originalSettings;
+    AppSettings m_appliedSettings;
+    bool m_loading = false;
     AnnotationStyle m_style;
 };
 
