@@ -183,8 +183,10 @@ bool DocumentSession::saveNow(QString *errorMessage)
 {
     if (!m_loaded || !m_manager || !m_manager->isOpen())
         return true;
-    if (m_workspace)
+    if (m_workspace) {
+        m_workspace->flushPendingStyle();
         m_workspace->commitPendingNote();
+    }
     if (!m_dirty) {
         saveReadingState();
         return true;

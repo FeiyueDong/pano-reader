@@ -248,7 +248,8 @@ void MainWindow::buildActions()
         const char *shortcut;
     } tools[] = {
         {PdfView::Tool::Select, "选择", "V"},
-        {PdfView::Tool::TextSelect, "文本选择", "T"},
+        {PdfView::Tool::Hand, "抓手", "G"},
+        {PdfView::Tool::RegionSelect, "框选", "B"},
         {PdfView::Tool::Highlight, "高亮", "H"},
         {PdfView::Tool::Underline, "下划线", "U"},
         {PdfView::Tool::StrikeOut, "删除线", "S"},
@@ -396,10 +397,7 @@ void MainWindow::applyThemeFromSettings()
     ThemeId id = ThemeId::ModernLight;
     if (!ThemeManager::fromKey(m_settings->settings().themeKey, &id))
         id = ThemeId::ModernLight;
-    m_themes->setCurrentTheme(id, qApp);
-    QFont font = QApplication::font();
-    font.setPointSize(m_settings->settings().uiFontSize);
-    QApplication::setFont(font);
+    m_themes->applyAppearance(id, m_settings->settings().uiFontSize, qApp);
 
     for (const Anchor &anchor : std::as_const(anchors)) {
         if (anchor.session->view()->hasDocument())

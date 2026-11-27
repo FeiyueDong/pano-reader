@@ -1,6 +1,7 @@
 #include "reader/PdfView.h"
 
 #include "annotation/AnnotationCommands.h"
+#include "annotation/AnnotationGeometry.h"
 #include "annotation/AnnotationRenderer.h"
 #include "annotation/TextSelectionGeometry.h"
 
@@ -22,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 
 namespace pano {
 
@@ -35,7 +37,7 @@ QPointF snapToAxis(const QPointF &start, const QPointF &point)
     const qreal length = std::hypot(delta.x(), delta.y());
     if (length < 0.5)
         return point;
-    const qreal step = M_PI / 4.0;
+    const qreal step = std::numbers::pi / 4.0;
     const qreal angle = std::round(std::atan2(delta.y(), delta.x()) / step) * step;
     return start + QPointF(std::cos(angle), std::sin(angle)) * length;
 }
@@ -201,6 +203,7 @@ void PdfView::setTool(Tool tool)
 {
     if (m_tool == tool)
         return;
+    clearTemporarySelections();
     m_tool = tool;
     m_dragMode = DragMode::None;
     m_draft = Annotation();
@@ -208,13 +211,11 @@ void PdfView::setTool(Tool tool)
     m_dragPage = -1;
     m_textSelecting = false;
     applyToolPreset(tool);
-    if (tool != Tool::TextSelect) {
-        m_textSelection.reset();
-        m_textSelectionPage = -1;
-    }
 
     Qt::CursorShape shape = Qt::ArrowCursor;
-    if (tool == Tool::TextSelect)
+    if (tool == Tool::RegionSelect)
+        shape = Qt::CrossCursor;
+    else if (tool == Tool::TextSelect)
         shape = Qt::IBeamCursor;
     else if (tool == Tool::Hand)
         shape = Qt::OpenHandCursor;
@@ -234,6 +235,8 @@ QString PdfView::toolDisplayName(Tool tool)
         return tr("选择/移动");
     case Tool::Hand:
         return tr("抓手");
+    case Tool::RegionSelect:
+        return tr("框选");
     case Tool::TextSelect:
         return tr("文本选择");
     case Tool::Highlight:
@@ -588,9 +591,14 @@ void PdfView::deleteSelected()
 
 void PdfView::applyStyleToSelected(const AnnotationStyle &style)
 {
-    if (m_selectedId.isEmpty())
+    applyStyleToAnnotation(m_selectedId, style);
+}
+
+void PdfView::applyStyleToAnnotation(const QString &annotationId, const AnnotationStyle &style)
+{
+    if (annotationId.isEmpty())
         return;
-    const Annotation *annotation = m_annotations.find(m_selectedId);
+    const Annotation *annotation = m_annotations.find(annotationId);
     if (!annotation)
         return;
     Annotation after = *annotation;
@@ -604,7 +612,9 @@ void PdfView::applyStyleToSelected(const AnnotationStyle &style)
         && qFuzzyCompare(after.style.strokeWidthPt, annotation->style.strokeWidthPt)
         && after.style.fillColor == annotation->style.fillColor
         && qFuzzyCompare(after.style.opacity, annotation->style.opacity)
-        && after.style.blend == annotation->style.blend) {
+        && after.style.blend == annotation->style.blend
+        && after.style.lineStyle == annotation->style.lineStyle
+        && after.style.strokeEnabled == annotation->style.strokeEnabled) {
         return;
     }
     m_undoStack.push(new ModifyAnnotationCommand(&m_annotations, *annotation, after));
@@ -760,6 +770,21 @@ void PdfView::paintSelectionOverlay(QPainter &painter)
 {
     if (!m_selectionOverlayVisible)
         return;
+    if (hasRegionSelection()) {
+        const QTransform pageToView = pageToViewTransform(m_regionSelectionPage);
+        const QRectF pageViewRect = pageRectInView(m_regionSelectionPage);
+        const QRectF rect = pageToView.mapRect(m_regionSelection);
+        painter.save();
+        painter.setClipRect(pageViewRect);
+        QColor fill(QStringLiteral("#2f6fed"));
+        fill.setAlpha(40);
+        painter.fillRect(rect, fill);
+        painter.setPen(QPen(QColor(QStringLiteral("#2f6fed")), 1.0, Qt::DashLine));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(rect);
+        painter.restore();
+        return;
+    }
     if (!m_textSelection || m_textSelectionPage < 0 || m_textSelectionPage >= m_pageSizes.size())
         return;
     if (!m_textSelection->isValid() || m_textSelection->bounds().isEmpty())
@@ -830,7 +855,7 @@ void PdfView::paintSelectedAnnotationOutline(QPainter &painter)
 
         if (selection->isResizable()
             && m_dragMode != DragMode::DragAnnotation) {
-            const QVector<QPointF> handles = handlePointsInPage(selection->bounds());
+            const QVector<QPointF> handles = handlePointsInPage(*selection);
             painter.setPen(QPen(QColor(QStringLiteral("#2f6fed")), 1.0));
             painter.setBrush(Qt::white);
             for (const QPointF &handle : handles) {
@@ -1004,20 +1029,27 @@ QRectF PdfView::pageRectInView(int pageIndex) const
 
 QRectF PdfView::annotationPageRegion(const Annotation &annotation) const
 {
-    if (!annotation.polygons.isEmpty()) {
-        QRectF region;
-        for (const QPolygonF &polygon : annotation.polygons)
-            region = region.isNull() ? polygon.boundingRect()
-                                     : region.united(polygon.boundingRect());
-        if (!region.isEmpty())
+    if (annotation.isTextType() && !annotation.polygons.isEmpty()) {
+        const QVector<QPolygonF> polygons = TextSelectionGeometry::normalize(annotation.polygons);
+        QVector<QRectF> rects;
+        rects.reserve(polygons.size());
+        for (const QPolygonF &polygon : polygons)
+            rects.append(polygon.boundingRect());
+        const QRectF region = unionBounds(rects);
+        if (!region.isNull())
             return region;
     }
     if (annotation.type == AnnotationType::NotePoint)
         return QRectF(annotation.rect.topLeft(), QSizeF(0.0, 0.0));
-    const QRectF bounds = annotation.bounds().normalized();
-    if (!bounds.isEmpty())
-        return bounds;
-    return QRectF(annotation.p1, QSizeF(0.0, 0.0));
+
+    QRectF bounds = annotation.bounds();
+    if (!hasFiniteBounds(bounds))
+        return QRectF();
+    if (annotation.isPathType() || annotation.type == AnnotationType::Line) {
+        const qreal pad = std::max<qreal>(0.5, annotation.style.strokeWidthPt / 2.0);
+        bounds = bounds.adjusted(-pad, -pad, pad, pad);
+    }
+    return bounds;
 }
 
 QPointF PdfView::viewToContent(const QPointF &viewPos) const
@@ -1094,6 +1126,13 @@ void PdfView::wheelEvent(QWheelEvent *event)
 
 void PdfView::keyPressEvent(QKeyEvent *event)
 {
+    if ((event->key() == Qt::Key_Shift) && m_draft.pageIndex >= 0
+        && m_dragMode == DragMode::DrawShape) {
+        updateDraw(m_draft.pageIndex, m_dragCurrentPage);
+        event->accept();
+        return;
+    }
+
     if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
         if (m_tool == Tool::Select) {
             deleteSelected();
@@ -1125,6 +1164,18 @@ void PdfView::keyPressEvent(QKeyEvent *event)
     QAbstractScrollArea::keyPressEvent(event);
 }
 
+void PdfView::keyReleaseEvent(QKeyEvent *event)
+{
+    if (event->key() == Qt::Key_Shift && m_draft.pageIndex >= 0
+        && m_dragMode == DragMode::DrawShape) {
+        updateDraw(m_draft.pageIndex, m_dragCurrentPage);
+        event->accept();
+        return;
+    }
+    QAbstractScrollArea::keyReleaseEvent(event);
+}
+
+
 void PdfView::mousePressEvent(QMouseEvent *event)
 {
     if (event->button() != Qt::LeftButton) {
@@ -1144,8 +1195,10 @@ void PdfView::mousePressEvent(QMouseEvent *event)
     m_dragMoved = false;
 
     if (pageIndex < 0) {
-        if (m_tool == Tool::Select)
+        if (m_tool == Tool::Select) {
             selectAnnotation(QString());
+            clearTemporarySelections();
+        }
         return;
     }
 
@@ -1173,11 +1226,27 @@ void PdfView::mousePressEvent(QMouseEvent *event)
         return;
     }
 
+    if (m_tool == Tool::RegionSelect) {
+        beginRegionSelection(viewPos);
+        return;
+    }
+
     if (m_tool == Tool::Select) {
+        const bool forceRegion = event->modifiers().testFlag(Qt::ControlModifier);
+        const bool forceText = event->modifiers().testFlag(Qt::AltModifier);
+        if (forceRegion) {
+            beginRegionSelection(viewPos);
+            return;
+        }
+        if (forceText) {
+            selectAnnotation(QString());
+            beginTextSelection(viewPos);
+            return;
+        }
         if (!m_selectedId.isEmpty()) {
             const Annotation *selected = m_annotations.find(m_selectedId);
             if (selected && selected->isResizable()) {
-                const QVector<QPointF> handles = handlePointsInPage(selected->bounds());
+                const QVector<QPointF> handles = handlePointsInPage(*selected);
                 const QTransform pageToView = pageToViewTransform(selected->pageIndex);
                 for (int i = 0; i < handles.size(); ++i) {
                     if (QLineF(pageToView.map(handles.at(i)), viewPos).length() <= 7.0) {
@@ -1192,9 +1261,18 @@ void PdfView::mousePressEvent(QMouseEvent *event)
         selectAnnotation(hit);
         if (!hit.isEmpty()) {
             const Annotation *annotation = m_annotations.find(hit);
+            if (annotation && annotation->isTextType()) {
+                beginTextSelection(viewPos);
+                return;
+            }
             if (annotation && annotation->isMovable())
                 beginAnnotationDrag(hit, viewPos);
+            return;
         }
+        if (textAtPagePoint(clampToPage(pagePoint, pageIndex), pageIndex))
+            beginTextSelection(viewPos);
+        else
+            beginRegionSelection(viewPos);
         return;
     }
 
@@ -1236,6 +1314,9 @@ void PdfView::mouseMoveEvent(QMouseEvent *event)
     case DragMode::TextSelection:
         updateTextSelection(viewPos);
         break;
+    case DragMode::RegionSelection:
+        updateRegionSelection(viewPos);
+        break;
     case DragMode::DrawShape:
     case DragMode::DrawPath:
         updateDraw(m_dragPage, viewToPage(viewPos, m_dragPage));
@@ -1259,7 +1340,7 @@ void PdfView::mouseMoveEvent(QMouseEvent *event)
         if (!m_selectedId.isEmpty()) {
             const Annotation *selected = m_annotations.find(m_selectedId);
             if (selected && selected->isResizable()) {
-                const QVector<QPointF> handles = handlePointsInPage(selected->bounds());
+                const QVector<QPointF> handles = handlePointsInPage(*selected);
                 const QTransform pageToView = pageToViewTransform(selected->pageIndex);
                 for (int i = 0; i < handles.size(); ++i) {
                     const QPointF handle = pageToView.map(handles.at(i));
@@ -1298,6 +1379,10 @@ void PdfView::mouseReleaseEvent(QMouseEvent *event)
     case DragMode::TextSelection:
         updateTextSelection(event->position());
         finishTextSelection();
+        break;
+    case DragMode::RegionSelection:
+        updateRegionSelection(event->position());
+        finishRegionSelection();
         break;
     case DragMode::DrawShape:
     case DragMode::DrawPath:
@@ -1379,9 +1464,15 @@ QPolygonF PdfView::annotationViewPolygon(const Annotation &annotation, int pageI
     return polygon;
 }
 
-QVector<QPointF> PdfView::handlePointsInPage(const QRectF &pageBounds) const
+QVector<QPointF> PdfView::handlePointsInPage(const Annotation &annotation) const
 {
-    const QRectF bounds = pageBounds.normalized();
+    if (annotation.type == AnnotationType::Line)
+        return {annotation.p1, annotation.p2};
+    if ((annotation.type == AnnotationType::Pencil
+         || annotation.type == AnnotationType::Highlighter)
+        && annotation.path.size() == 2)
+        return {annotation.path.first(), annotation.path.last()};
+    const QRectF bounds = annotation.bounds().normalized();
     const QPointF center = bounds.center();
     QVector<QPointF> handles;
     handles << bounds.topLeft() << bounds.topRight() << bounds.bottomRight()
@@ -1391,7 +1482,8 @@ QVector<QPointF> PdfView::handlePointsInPage(const QRectF &pageBounds) const
     return handles;
 }
 
-QRectF PdfView::resizedBounds(const QRectF &original, int handle, const QPointF &pagePoint) const
+QRectF PdfView::resizedBounds(const QRectF &original, int handle, const QPointF &pagePoint,
+                              bool keepAspect) const
 {
     QRectF bounds = original.normalized();
     if (m_dragPage < 0 || m_dragPage >= m_pageSizes.size())
@@ -1403,7 +1495,33 @@ QRectF PdfView::resizedBounds(const QRectF &original, int handle, const QPointF 
     qreal top = bounds.top();
     qreal right = bounds.right();
     qreal bottom = bounds.bottom();
-
+    const qreal aspect = bounds.height() > 0.0 ? bounds.width() / bounds.height() : 1.0;
+    QPointF opposite;
+    if (handle == 0)
+        opposite = bounds.bottomRight();
+    else if (handle == 1)
+        opposite = bounds.bottomLeft();
+    else if (handle == 2)
+        opposite = bounds.topLeft();
+    else if (handle == 3)
+        opposite = bounds.topRight();
+    if (keepAspect && handle <= 3 && bounds.height() > 0.0) {
+        const qreal sx = pagePoint.x() >= opposite.x() ? 1.0 : -1.0;
+        const qreal sy = pagePoint.y() >= opposite.y() ? 1.0 : -1.0;
+        qreal width = qMax(minSize, qAbs(pagePoint.x() - opposite.x()));
+        qreal height = width / aspect;
+        if (height < minSize) {
+            height = minSize;
+            width = height * aspect;
+        }
+        QPointF corner(opposite.x() + sx * width, opposite.y() + sy * height);
+        switch (handle) {
+        case 0: left = corner.x(); top = corner.y(); right = opposite.x(); bottom = opposite.y(); break;
+        case 1: right = corner.x(); top = corner.y(); left = opposite.x(); bottom = opposite.y(); break;
+        case 2: right = corner.x(); bottom = corner.y(); left = opposite.x(); top = opposite.y(); break;
+        case 3: left = corner.x(); bottom = corner.y(); right = opposite.x(); top = opposite.y(); break;
+        }
+    } else {
     switch (handle) {
     case 0:
         left = pagePoint.x();
@@ -1435,6 +1553,7 @@ QRectF PdfView::resizedBounds(const QRectF &original, int handle, const QPointF 
         break;
     default:
         break;
+    }
     }
 
     left = qBound(0.0, left, pageSize.width() - minSize);
@@ -1498,10 +1617,11 @@ void PdfView::finishTextSelection()
                               && !selection->text().trimmed().isEmpty()
                               && !selection->bounds().isEmpty();
 
-    if (m_tool == Tool::TextSelect) {
+    if (m_tool == Tool::TextSelect || m_tool == Tool::Select) {
         if (hasSelection) {
             m_textSelectionPage = m_dragPage;
-            emit statusMessage(tr("已选择 %1 个字符，Ctrl+C 复制").arg(selection->text().size()));
+            emit statusMessage(tr("已选择 %1 个字符").arg(selection->text().size()));
+            emit textSelectionChanged();
         } else {
             m_textSelection.reset();
             m_textSelectionPage = -1;
@@ -1524,6 +1644,207 @@ void PdfView::finishTextSelection()
     m_textSelection.reset();
     m_textSelectionPage = -1;
     m_textSelecting = false;
+}
+
+QString PdfView::addTextAnnotation(const QPdfSelection &selection, int pageIndex,
+                                    AnnotationType type, const AnnotationStyle &style)
+{
+    if (!selection.isValid() || selection.bounds().isEmpty())
+        return QString();
+    Annotation annotation = makeBaseAnnotation(type, pageIndex);
+    annotation.style = style;
+    annotation.polygons.clear();
+    for (const QPolygonF &polygon : selection.bounds()) {
+        const QRectF box = polygon.boundingRect();
+        if (polygon.size() >= 3 && box.width() >= 0.05 && box.height() >= 0.05
+            && std::isfinite(box.x()) && std::isfinite(box.y()))
+            annotation.polygons.append(polygon);
+    }
+    if (annotation.polygons.isEmpty())
+        return QString();
+    QRectF rawRect;
+    for (const QPolygonF &polygon : annotation.polygons)
+        rawRect = rawRect.isNull() ? polygon.boundingRect()
+                                   : rawRect.united(polygon.boundingRect());
+    annotation.rect = rawRect.normalized();
+    annotation.textStart = selection.startIndex();
+    annotation.textEnd = selection.endIndex();
+    annotation.text = selection.text();
+    addAnnotation(annotation, true);
+    return annotation.id;
+}
+
+QString PdfView::createTextAnnotationFromSelection(AnnotationType type,
+                                                  const AnnotationStyle &style)
+{
+    if (!m_textSelection || m_textSelectionPage < 0)
+        return QString();
+    const QString id = addTextAnnotation(*m_textSelection, m_textSelectionPage, type, style);
+    clearTemporarySelections();
+    return id;
+}
+
+QString PdfView::createRegionAnnotation(bool highlighter, const AnnotationStyle &style)
+{
+    if (!hasRegionSelection())
+        return QString();
+    Annotation annotation = makeBaseAnnotation(AnnotationType::Rectangle, m_regionSelectionPage);
+    annotation.style = style;
+    annotation.rect = m_regionSelection.normalized();
+    if (highlighter) {
+        annotation.style.strokeEnabled = false;
+        annotation.style.fillColor = style.fillColor.isValid() ? style.fillColor
+                                                               : QColor(QStringLiteral("#FFE066"));
+        annotation.style.opacity = style.opacity;
+        annotation.style.blend = BlendMode::Multiply;
+    }
+    addAnnotation(annotation, true);
+    clearTemporarySelections();
+    return annotation.id;
+}
+
+QImage PdfView::regionImage() const
+{
+    if (!hasRegionSelection())
+        return QImage();
+    const QSizeF pageSize = m_layout.pageSizePt(m_regionSelectionPage);
+    if (pageSize.isEmpty())
+        return QImage();
+    qreal scale = 2.0;
+    const QRectF region = m_regionSelection.normalized();
+    if (region.width() > 0.0 && region.height() > 0.0) {
+        scale = qMin<qreal>(3.0, qMin<qreal>(1800.0 / region.width(),
+                                             1800.0 / region.height()));
+        scale = qMax<qreal>(1.0, scale);
+    }
+    const QSize pagePixels(qCeil(pageSize.width() * scale), qCeil(pageSize.height() * scale));
+    QImage pageImage = m_document.pdf()->render(m_regionSelectionPage, pagePixels,
+                                                QPdfDocumentRenderOptions(),
+                                                QImage::Format_ARGB32_Premultiplied,
+                                                QColor(Qt::white));
+    if (pageImage.isNull())
+        return QImage();
+    QPainter painter(&pageImage);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QTransform pageToImage = QTransform::fromScale(scale, scale);
+    for (const Annotation &annotation : m_annotations.annotations()) {
+        if (annotation.pageIndex != m_regionSelectionPage)
+            continue;
+        AnnotationRenderer::paint(painter, annotation, pageToImage,
+                                  QRectF(QPointF(0, 0), pagePixels), 1.0);
+    }
+    painter.end();
+    const QRect crop = QRectF(region.left() * scale, region.top() * scale,
+                              region.width() * scale, region.height() * scale)
+                           .toAlignedRect()
+                           .intersected(pageImage.rect());
+    return crop.isEmpty() ? QImage() : pageImage.copy(crop);
+}
+
+QRectF PdfView::textSelectionViewRect() const
+{
+    if (!m_textSelection || m_textSelectionPage < 0
+        || m_textSelectionPage >= m_pageSizes.size() || m_textSelection->bounds().isEmpty())
+        return QRectF();
+    const QTransform pageToView = pageToViewTransform(m_textSelectionPage);
+    QRectF rect;
+    for (const QPolygonF &polygon : m_textSelection->bounds()) {
+        const QRectF mapped = pageToView.mapRect(polygon.boundingRect());
+        rect = rect.isNull() ? mapped : rect.united(mapped);
+    }
+    return rect;
+}
+
+QRectF PdfView::regionViewRect() const
+{
+    if (!hasRegionSelection())
+        return QRectF();
+    return pageToViewTransform(m_regionSelectionPage).mapRect(m_regionSelection);
+}
+
+bool PdfView::hasTextSelection() const
+{
+    return m_textSelection && m_textSelection->isValid()
+           && !m_textSelection->text().trimmed().isEmpty()
+           && !m_textSelection->bounds().isEmpty();
+}
+
+bool PdfView::hasRegionSelection() const
+{
+    return m_regionSelectionPage >= 0 && m_regionSelectionPage < m_pageSizes.size()
+           && m_regionSelection.width() >= 4.0 && m_regionSelection.height() >= 4.0;
+}
+
+void PdfView::clearTemporarySelections()
+{
+    const bool hadText = hasTextSelection();
+    const bool hadRegion = hasRegionSelection();
+    m_textSelection.reset();
+    m_textSelectionPage = -1;
+    m_regionSelection = QRectF();
+    m_regionSelectionPage = -1;
+    m_textSelecting = false;
+    viewport()->update();
+    if (hadText)
+        emit textSelectionChanged();
+    if (hadRegion)
+        emit regionSelectionChanged();
+}
+
+void PdfView::beginRegionSelection(const QPointF &viewPos)
+{
+    const int pageIndex = pageAtViewPos(viewPos);
+    if (pageIndex < 0) {
+        clearTemporarySelections();
+        return;
+    }
+    m_regionSelectionPage = pageIndex;
+    m_dragPage = pageIndex;
+    m_dragStartPage = clampToPage(viewToPage(viewPos, pageIndex), pageIndex);
+    m_dragCurrentPage = m_dragStartPage;
+    m_regionSelection = QRectF(m_dragStartPage, QSizeF(0, 0));
+    m_dragMode = DragMode::RegionSelection;
+    m_textSelection.reset();
+    m_textSelectionPage = -1;
+    emit textSelectionChanged();
+}
+
+void PdfView::updateRegionSelection(const QPointF &viewPos)
+{
+    if (m_dragMode != DragMode::RegionSelection || m_dragPage < 0)
+        return;
+    const QPointF point = clampToPage(viewToPage(viewPos, m_dragPage), m_dragPage);
+    m_dragCurrentPage = point;
+    m_regionSelection = QRectF(m_dragStartPage, point).normalized();
+    viewport()->update();
+}
+
+void PdfView::finishRegionSelection()
+{
+    if (m_dragMode != DragMode::RegionSelection)
+        return;
+    m_dragMode = DragMode::None;
+    if (!hasRegionSelection()) {
+        m_regionSelection = QRectF();
+        m_regionSelectionPage = -1;
+    }
+    viewport()->update();
+    if (hasRegionSelection())
+        emit statusMessage(tr("已框选区域，可复制、保存或创建标注"));
+    emit regionSelectionChanged();
+}
+
+bool PdfView::textAtPagePoint(const QPointF &pagePoint, int pageIndex) const
+{
+    if (!hasDocument() || pageIndex < 0)
+        return false;
+    const QPointF delta(0.8, 0.0);
+    QPdfSelection selection = m_document.pdf()->getSelection(pageIndex, pagePoint - delta,
+                                                             pagePoint + delta);
+    if (!selection.isValid())
+        selection = m_document.pdf()->getSelection(pageIndex, pagePoint,
+                                                   pagePoint + QPointF(1.0, 0.0));
+    return selection.isValid() && !selection.text().trimmed().isEmpty();
 }
 
 void PdfView::beginDraw(int pageIndex, const QPointF &pagePoint)
@@ -1590,13 +1911,9 @@ void PdfView::updateDraw(int pageIndex, const QPointF &pagePoint)
             if (QLineF(m_draft.path.last(), point).length() >= 0.4)
                 m_draft.path.append(point);
         }
-        QRectF bounds(m_dragStartPage, QSizeF(0.0, 0.0));
-        for (const QPointF &p : m_draft.path)
-            bounds |= QRectF(p, QSizeF(0.0, 0.0));
-        m_draft.rect = bounds.adjusted(-m_draft.style.strokeWidthPt / 2.0,
-                                       -m_draft.style.strokeWidthPt / 2.0,
-                                       m_draft.style.strokeWidthPt / 2.0,
-                                       m_draft.style.strokeWidthPt / 2.0);
+        const QRectF bounds = pathBounds(m_draft.path);
+        const qreal pad = m_draft.style.strokeWidthPt / 2.0;
+        m_draft.rect = bounds.adjusted(-pad, -pad, pad, pad);
         break;
     }
     default:
@@ -1683,7 +2000,39 @@ void PdfView::updateAnnotationDrag(const QPointF &viewPos)
         m_draft.translate(QPointF(dx, dy));
         m_draft.modifiedAt = nowIsoUtc();
     } else if (m_dragMode == DragMode::ResizeAnnotation) {
-        const QRectF newBounds = resizedBounds(m_editOriginal.bounds(), m_resizeHandle, point);
+        if (m_editOriginal.type == AnnotationType::Line) {
+            QPointF fixed = m_resizeHandle == 0 ? m_editOriginal.p2 : m_editOriginal.p1;
+            QPointF moving = shiftHeld() ? snapToAxis(fixed, point) : point;
+            m_draft = m_editOriginal;
+            if (m_resizeHandle == 0)
+                m_draft.p1 = moving;
+            else
+                m_draft.p2 = moving;
+            m_draft.rect = QRectF(m_draft.p1, m_draft.p2).normalized();
+            m_draft.modifiedAt = nowIsoUtc();
+            m_dragMoved = QLineF(m_draft.p1, m_draft.p2).length() >= 0.5;
+            viewport()->update();
+            return;
+        }
+        if ((m_editOriginal.type == AnnotationType::Pencil
+             || m_editOriginal.type == AnnotationType::Highlighter)
+            && m_editOriginal.path.size() == 2 && m_resizeHandle < 2) {
+            QPointF fixed = m_resizeHandle == 0 ? m_editOriginal.path.last()
+                                                : m_editOriginal.path.first();
+            QPointF moving = shiftHeld() ? snapToAxis(fixed, point) : point;
+            m_draft = m_editOriginal;
+            if (m_resizeHandle == 0)
+                m_draft.path[0] = moving;
+            else
+                m_draft.path[1] = moving;
+            m_draft.rect = pathBounds(m_draft.path);
+            m_draft.modifiedAt = nowIsoUtc();
+            m_dragMoved = true;
+            viewport()->update();
+            return;
+        }
+        const QRectF newBounds = resizedBounds(m_editOriginal.bounds(), m_resizeHandle,
+                                               point, shiftHeld());
         m_draft = m_editOriginal;
         m_draft.setBounds(newBounds);
         if (newBounds != m_editOriginal.bounds().normalized())
@@ -1722,26 +2071,12 @@ Annotation PdfView::makeBaseAnnotation(AnnotationType type, int pageIndex) const
 
 void PdfView::createTextAnnotation(const QPdfSelection &selection, int pageIndex)
 {
-    if (!selection.isValid() || selection.bounds().isEmpty())
-        return;
-
     AnnotationType type = AnnotationType::Highlight;
     if (m_tool == Tool::Underline)
         type = AnnotationType::Underline;
     else if (m_tool == Tool::StrikeOut)
         type = AnnotationType::StrikeOut;
-
-    Annotation annotation = makeBaseAnnotation(type, pageIndex);
-    annotation.polygons = TextSelectionGeometry::normalize(selection.bounds());
-    QRectF mergedRect;
-    for (const QPolygonF &polygon : annotation.polygons)
-        mergedRect = mergedRect.isNull() ? polygon.boundingRect() : mergedRect.united(polygon.boundingRect());
-    annotation.rect = mergedRect.normalized();
-    annotation.textStart = selection.startIndex();
-    annotation.textEnd = selection.endIndex();
-    annotation.text = selection.text();
-    annotation.style = m_defaultStyle;
-    addAnnotation(annotation, true);
+    addTextAnnotation(selection, pageIndex, type, m_defaultStyle);
 }
 
 void PdfView::addAnnotation(const Annotation &annotation, bool selectAfter)

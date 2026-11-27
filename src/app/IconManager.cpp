@@ -17,7 +17,7 @@ IconManager *IconManager::instance()
 
 IconManager::IconManager(QObject *parent)
     : QObject(parent)
-    , m_foreground(QColor(QStringLiteral("#6b7280")))
+    , m_foreground(QColor(QStringLiteral("#9aa4b2")))
 {
 }
 

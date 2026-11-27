@@ -8,6 +8,7 @@
 #include <QRectF>
 #include <QString>
 #include <QVector>
+#include <Qt>
 
 namespace pano {
 
@@ -31,12 +32,22 @@ enum class BlendMode {
     Multiply
 };
 
+enum class LineStyle {
+    Solid,
+    Dash,
+    Dot,
+    DashDot,
+    DashDotDot
+};
+
 struct AnnotationStyle {
     QColor strokeColor = QColor(0xD9, 0x4F, 0x4F);
     qreal strokeWidthPt = 1.5;
     QColor fillColor; // invalid QColor == no fill
     qreal opacity = 1.0;
     BlendMode blend = BlendMode::Normal;
+    LineStyle lineStyle = LineStyle::Solid;
+    bool strokeEnabled = true;
 
     bool hasFill() const { return fillColor.isValid(); }
 };
@@ -89,6 +100,11 @@ bool annotationTypeFromString(const QString &name, AnnotationType *type);
 
 QString blendModeName(BlendMode mode);
 bool blendModeFromString(const QString &name, BlendMode *mode);
+
+QString lineStyleName(LineStyle style);
+QString lineStyleDisplayName(LineStyle style);
+bool lineStyleFromString(const QString &name, LineStyle *style);
+Qt::PenStyle toPenStyle(LineStyle style);
 
 QString nowIsoUtc();
 QString newAnnotationId();

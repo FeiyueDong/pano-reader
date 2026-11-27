@@ -48,7 +48,7 @@ SettingsDialog::SettingsDialog(SettingsManager *settings, ThemeManager *themes, 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Apply,
                                          this);
     connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
-        applyLiveSettings();
+        commitSettings();
         if (!flushPresetEdits())
             return;
         QString error;
@@ -61,7 +61,7 @@ SettingsDialog::SettingsDialog(SettingsManager *settings, ThemeManager *themes, 
     });
     connect(buttons, &QDialogButtonBox::rejected, this, &SettingsDialog::rejectSettings);
     connect(buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked, this, [this]() {
-        applyLiveSettings();
+        commitSettings();
         if (!flushPresetEdits())
             return;
         QString error;
@@ -201,11 +201,48 @@ QWidget *SettingsDialog::buildAnnotationTab()
     });
     form->addRow(tr("描边"), m_strokeButton);
 
+    m_presetStrokeCheck = new QCheckBox(tr("显示描边"), box);
+    m_presetStrokeCheck->setChecked(true);
+    form->addRow(QString(), m_presetStrokeCheck);
+
     m_widthSpin = new QDoubleSpinBox(box);
     m_widthSpin->setRange(0.25, 20.0);
     m_widthSpin->setSingleStep(0.25);
     m_widthSpin->setSuffix(tr(" pt"));
     form->addRow(tr("线宽"), m_widthSpin);
+
+    m_presetLineStyleCombo = new QComboBox(box);
+    for (LineStyle style : {LineStyle::Solid, LineStyle::Dash, LineStyle::Dot,
+                            LineStyle::DashDot, LineStyle::DashDotDot})
+        m_presetLineStyleCombo->addItem(lineStyleDisplayName(style), static_cast<int>(style));
+    form->addRow(tr("线型"), m_presetLineStyleCombo);
+
+    auto *fillRow = new QWidget(box);
+    auto *fillLayout = new QHBoxLayout(fillRow);
+    fillLayout->setContentsMargins(0, 0, 0, 0);
+    m_presetFillCheck = new QCheckBox(tr("填充"), fillRow);
+    m_presetFillButton = new QPushButton(fillRow);
+    m_presetFillButton->setFixedSize(40, 22);
+    fillLayout->addWidget(m_presetFillCheck);
+    fillLayout->addWidget(m_presetFillButton);
+    connect(m_presetFillCheck, &QCheckBox::toggled, this, [this](bool checked) {
+        if (!m_currentPresetTool.isEmpty()) {
+            m_style.fillColor = checked ? m_style.fillColor : QColor();
+            storePresetEditor();
+        }
+    });
+    connect(m_presetFillButton, &QPushButton::clicked, this, [this]() {
+        QColor initial = m_style.fillColor.isValid() ? m_style.fillColor : QColor(QStringLiteral("#FFE066"));
+        const QColor color = QColorDialog::getColor(initial, this, tr("选择填充颜色"),
+                                                    QColorDialog::ShowAlphaChannel);
+        if (!color.isValid())
+            return;
+        m_style.fillColor = color;
+        m_presetFillCheck->setChecked(true);
+        storePresetEditor();
+        loadPresetEditor(m_currentPresetTool);
+    });
+    form->addRow(tr("填充"), fillRow);
 
     m_opacitySpin = new QSpinBox(box);
     m_opacitySpin->setRange(5, 100);
@@ -315,6 +352,12 @@ void SettingsDialog::storePresetEditor()
     style.strokeWidthPt = m_widthSpin->value();
     style.opacity = m_opacitySpin->value() / 100.0;
     style.blend = static_cast<BlendMode>(m_blendCombo->currentData().toInt());
+    if (m_presetStrokeCheck)
+        style.strokeEnabled = m_presetStrokeCheck->isChecked();
+    if (m_presetLineStyleCombo)
+        style.lineStyle = static_cast<LineStyle>(m_presetLineStyleCombo->currentData().toInt());
+    if (m_presetFillCheck && !m_presetFillCheck->isChecked())
+        style.fillColor = QColor();
     m_presetEdits.insert(m_currentPresetTool, style);
 }
 
@@ -326,6 +369,19 @@ void SettingsDialog::loadPresetEditor(const QString &toolId)
     const AnnotationStyle style = m_presetEdits.value(toolId, ToolPresets::defaultStyle(toolId));
     m_style = style;
     m_widthSpin->setValue(style.strokeWidthPt);
+    if (m_presetStrokeCheck)
+        m_presetStrokeCheck->setChecked(style.strokeEnabled);
+    if (m_presetLineStyleCombo) {
+        const int lineIndex = m_presetLineStyleCombo->findData(static_cast<int>(style.lineStyle));
+        if (lineIndex >= 0)
+            m_presetLineStyleCombo->setCurrentIndex(lineIndex);
+    }
+    if (m_presetFillCheck) {
+        m_presetFillCheck->setChecked(style.fillColor.isValid());
+        m_presetFillButton->setText(style.fillColor.isValid()
+                                        ? style.fillColor.name(QColor::HexArgb)
+                                        : tr("无填充"));
+    }
     m_opacitySpin->setValue(qRound(style.opacity * 100.0));
     const int blendIndex = m_blendCombo->findData(static_cast<int>(style.blend));
     if (blendIndex >= 0)
@@ -361,10 +417,18 @@ void SettingsDialog::applyLiveSettings()
         return;
     const QString themeKey = m_themeCombo->currentData().toString();
     ThemeId id = ThemeId::ModernLight;
-    if (ThemeManager::fromKey(themeKey, &id))
-        m_themes->setCurrentTheme(id, qApp);
+    if (!ThemeManager::fromKey(themeKey, &id))
+        id = ThemeId::ModernLight;
     m_settings->setThemeKey(themeKey);
     m_settings->setUiFontSize(m_fontSpin->value());
+    m_themes->applyAppearance(id, m_fontSpin->value(), qApp);
+}
+
+void SettingsDialog::commitSettings()
+{
+    if (!m_settings || m_loading)
+        return;
+    applyLiveSettings();
     m_settings->setRestoreLastLibrary(m_restoreLibrary->isChecked());
     m_settings->setRestoreOpenTabs(m_restoreTabs->isChecked());
     m_settings->setAutosaveSeconds(m_autosaveSpin->value());
@@ -374,17 +438,26 @@ void SettingsDialog::applyLiveSettings()
     m_settings->setLastLibraryPath(m_libraryPath->text() == tr("（未打开书库）")
                                        ? QString()
                                        : m_libraryPath->text());
-    applyFont();
 }
 
 void SettingsDialog::applyFont()
 {
-    QFont font = QApplication::font();
-    font.setPointSize(m_fontSpin->value());
-    QApplication::setFont(font);
+    if (m_themes)
+        m_themes->applyAppearance(m_themes->currentTheme(), m_fontSpin->value(), qApp);
+}
+
+void SettingsDialog::reject()
+{
+    restoreAppliedSettings();
+    QDialog::reject();
 }
 
 void SettingsDialog::rejectSettings()
+{
+    reject();
+}
+
+void SettingsDialog::restoreAppliedSettings()
 {
     if (m_settings) {
         m_settings->setThemeKey(m_appliedSettings.themeKey);
@@ -392,17 +465,14 @@ void SettingsDialog::rejectSettings()
         m_settings->setRestoreLastLibrary(m_appliedSettings.restoreLastLibrary);
         m_settings->setRestoreOpenTabs(m_appliedSettings.restoreOpenTabs);
         m_settings->setAutosaveSeconds(m_appliedSettings.autosaveSeconds);
+        m_settings->setDefaultImportMode(m_appliedSettings.defaultImportMode);
         m_settings->setLastLibraryPath(m_appliedSettings.lastLibraryPath);
     }
     if (m_themes) {
         ThemeId original = ThemeId::ModernLight;
         if (ThemeManager::fromKey(m_appliedSettings.themeKey, &original))
-            m_themes->setCurrentTheme(original, qApp);
+            m_themes->applyAppearance(original, m_appliedSettings.uiFontSize, qApp);
     }
-    QFont font = QApplication::font();
-    font.setPointSize(m_appliedSettings.uiFontSize);
-    QApplication::setFont(font);
-    reject();
 }
 
 void SettingsDialog::chooseLibraryFolder()

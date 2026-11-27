@@ -29,13 +29,16 @@ public:
 
     AnnotationStyle annotationStyle() const;
     void setAnnotationStyle(const AnnotationStyle &style);
+    void reject() override;
 
 signals:
     void annotationDefaultsChanged(const AnnotationStyle &style);
 
 private slots:
     void applyLiveSettings();
+    void commitSettings();
     void rejectSettings();
+    void restoreAppliedSettings();
     void chooseLibraryFolder();
 
 private:
@@ -61,6 +64,10 @@ private:
     QSpinBox *m_autosaveSpin = nullptr;
     QComboBox *m_importModeCombo = nullptr;
     QPushButton *m_strokeButton = nullptr;
+    QCheckBox *m_presetStrokeCheck = nullptr;
+    QComboBox *m_presetLineStyleCombo = nullptr;
+    QCheckBox *m_presetFillCheck = nullptr;
+    QPushButton *m_presetFillButton = nullptr;
     QDoubleSpinBox *m_widthSpin = nullptr;
     QSpinBox *m_opacitySpin = nullptr;
     QComboBox *m_blendCombo = nullptr;

@@ -53,6 +53,7 @@ public:
     void insertImageIntoNote();
     void startRegionCapture();
     void refreshAll();
+    void flushPendingStyle();
     void reloadToolPreset();
 
 signals:
@@ -90,9 +91,13 @@ private slots:
     void schedulePresetSave();
     void updatePanelVisibility();
     void persistPanelState();
+    void updateFloatingToolBars();
 
 private:
     void buildUi();
+    void buildFloatingToolBars();
+    void applyTextFloatingAction(int action);
+    void applyRegionFloatingAction(int action);
     QToolBar *buildPrimaryToolBar();
     QToolBar *buildContextToolBar();
     QWidget *buildBottomBar();
@@ -119,6 +124,8 @@ private:
     PdfView *m_view = nullptr;
     NotePanel *m_notePanel = nullptr;
     RegionCaptureOverlay *m_captureOverlay = nullptr;
+    QWidget *m_textFloat = nullptr;
+    QWidget *m_regionFloat = nullptr;
 
     QToolBar *m_primaryToolBar = nullptr;
     QToolBar *m_contextToolBar = nullptr;
@@ -169,6 +176,7 @@ private:
     QWidget *m_fillWidget = nullptr;
     QWidget *m_widthWidget = nullptr;
     QWidget *m_opacityWidget = nullptr;
+    QWidget *m_lineStyleWidget = nullptr;
     QWidget *m_blendWidget = nullptr;
     QPushButton *m_colorButton = nullptr;
     QPushButton *m_fillButton = nullptr;
@@ -176,6 +184,8 @@ private:
     QDoubleSpinBox *m_widthSpin = nullptr;
     QSlider *m_opacitySlider = nullptr;
     QLabel *m_opacityValue = nullptr;
+    QComboBox *m_lineStyleCombo = nullptr;
+    QCheckBox *m_strokeCheck = nullptr;
     QComboBox *m_blendCombo = nullptr;
 
     QTimer *m_styleTimer = nullptr;
@@ -186,6 +196,11 @@ private:
     QTimer *m_statusTimer = nullptr;
 
     QString m_editingId;
+    QString m_styleTargetId;
+    QString m_styleTargetTool;
+    AnnotationStyle m_styleSnapshot;
+    bool m_styleSnapshotValid = false;
+    bool m_styleTargetObject = false;
     bool m_applyingStyle = false;
     bool m_applyingSelection = false;
     bool m_syncingControls = false;

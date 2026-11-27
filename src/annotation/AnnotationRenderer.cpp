@@ -231,9 +231,10 @@ void paint(QPainter &painter, const Annotation &annotation, const QTransform &pa
 
     QPen pen(annotation.style.strokeColor);
     pen.setWidthF(qMax<qreal>(0.25, annotation.style.strokeWidthPt));
+    pen.setStyle(toPenStyle(annotation.style.lineStyle));
     pen.setCapStyle(Qt::RoundCap);
     pen.setJoinStyle(Qt::RoundJoin);
-    painter.setPen(pen);
+    painter.setPen(annotation.style.strokeEnabled ? pen : QPen(Qt::NoPen));
     painter.setBrush(Qt::NoBrush);
 
     switch (annotation.type) {
@@ -242,11 +243,13 @@ void paint(QPainter &painter, const Annotation &annotation, const QTransform &pa
         QPainterPath path = geometryPath(annotation);
         if (annotation.style.hasFill())
             painter.fillPath(path, annotation.style.fillColor);
-        painter.drawPath(path);
+        if (annotation.style.strokeEnabled)
+            painter.drawPath(path);
         break;
     }
     case AnnotationType::Line:
-        painter.drawLine(annotation.p1, annotation.p2);
+        if (annotation.style.strokeEnabled)
+            painter.drawLine(annotation.p1, annotation.p2);
         break;
     case AnnotationType::Pencil: {
         if (annotation.path.size() == 1) {

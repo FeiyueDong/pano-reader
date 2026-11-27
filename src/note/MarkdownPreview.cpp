@@ -18,9 +18,6 @@ MarkdownPreview::MarkdownPreview(QWidget *parent)
     setOpenLinks(true);
     setContextMenuPolicy(Qt::DefaultContextMenu);
 
-    QFont baseFont = font();
-    baseFont.setPointSizeF(10.5);
-    document()->setDefaultFont(baseFont);
     document()->setDocumentMargin(4);
     applyDocumentStyle();
 }
@@ -34,21 +31,33 @@ void MarkdownPreview::applyDocumentStyle()
     const QString border = pal.color(QPalette::Mid).name();
     const QString headingBackground = pal.color(QPalette::AlternateBase).name();
 
+    const qreal base = font().pointSizeF() > 0.0 ? font().pointSizeF() : 11.0;
+    QFont baseFont = font();
+    baseFont.setPointSizeF(base);
+    document()->setDefaultFont(baseFont);
     document()->setDefaultStyleSheet(QStringLiteral(
-        "h1 { font-size: 20px; font-weight: 600; margin-top: 12px; margin-bottom: 6px; }"
-        "h2 { font-size: 17px; font-weight: 600; margin-top: 12px; margin-bottom: 4px; }"
-        "h3 { font-size: 15px; font-weight: 600; margin-top: 10px; margin-bottom: 4px; }"
-        "h4, h5, h6 { font-size: 13px; font-weight: 600; margin-top: 8px; margin-bottom: 2px; }"
+        "h1 { font-size: %1pt; font-weight: 600; margin-top: 12px; margin-bottom: 6px; }"
+        "h2 { font-size: %2pt; font-weight: 600; margin-top: 12px; margin-bottom: 4px; }"
+        "h3 { font-size: %3pt; font-weight: 600; margin-top: 10px; margin-bottom: 4px; }"
+        "h4, h5, h6 { font-size: %4pt; font-weight: 600; margin-top: 8px; margin-bottom: 2px; }"
         "p { margin-top: 3px; margin-bottom: 5px; }"
-        "code { font-family: \"DejaVu Sans Mono\", monospace; background-color: %1; color: %2; }"
-        "pre { background-color: %1; color: %2; padding: 8px; margin-top: 6px; margin-bottom: 6px; }"
-        "blockquote { border-left: 3px solid %3; margin-left: 0px; padding-left: 10px; color: %4; }"
+        "code { font-family: \"DejaVu Sans Mono\", monospace; background-color: %5; color: %6; }"
+        "pre { background-color: %5; color: %6; padding: 8px; margin-top: 6px; margin-bottom: 6px; }"
+        "blockquote { border-left: 3px solid %7; margin-left: 0px; padding-left: 10px; color: %8; }"
         "table { border-collapse: collapse; }"
-        "th, td { border: 1px solid %3; padding: 3px 6px; }"
-        "th { background-color: %5; }"
-        "hr { border: none; border-top: 1px solid %3; }"
+        "th, td { border: 1px solid %7; padding: 3px 6px; }"
+        "th { background-color: %9; }"
+        "hr { border: none; border-top: 1px solid %7; }"
         "a { color: #2f6fed; }")
-                                     .arg(codeBackground, text, border, muted, headingBackground));
+                                     .arg(QString::number(base * 1.8, 'f', 1))
+                                     .arg(QString::number(base * 1.55, 'f', 1))
+                                     .arg(QString::number(base * 1.35, 'f', 1))
+                                     .arg(QString::number(base * 1.15, 'f', 1))
+                                     .arg(codeBackground)
+                                     .arg(text)
+                                     .arg(border)
+                                     .arg(muted)
+                                     .arg(headingBackground));
 }
 
 void MarkdownPreview::changeEvent(QEvent *event)

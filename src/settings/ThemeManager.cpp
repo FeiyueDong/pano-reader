@@ -2,6 +2,8 @@
 
 #include <QApplication>
 #include <QPalette>
+#include <QWidget>
+#include <QStyle>
 
 namespace pano {
 
@@ -214,8 +216,55 @@ void ThemeManager::setCurrentTheme(ThemeId id, QApplication *application)
 {
     if (m_current == id && application && application->styleSheet() == styleSheet(id))
         return;
+    applyAppearance(id, m_fontPointSize, application);
+}
+
+void ThemeManager::setUiFontPointSize(int points)
+{
+    m_fontPointSize = qBound(8, points, 18);
+}
+
+void ThemeManager::applyAppearance(ThemeId id, int fontPointSize, QApplication *application)
+{
+    if (!application)
+        application = qobject_cast<QApplication *>(QApplication::instance());
+    if (!application)
+        return;
+
+    const int newSize = qBound(8, fontPointSize, 18);
+    const qreal oldSize = qMax(1, m_fontPointSize);
+    const qreal ratio = newSize / oldSize;
+
     m_current = id;
-    apply(application);
+    m_fontPointSize = newSize;
+
+    QFont baseFont = application->font();
+    baseFont.setPointSize(newSize);
+    application->setFont(baseFont);
+    application->setPalette(paletteFor(id));
+    application->setStyleSheet(styleSheet(id) + QStringLiteral(R"(
+        QComboBox, QComboBox QLineEdit, QSpinBox, QDoubleSpinBox { color: palette(text); }
+        QComboBox QLineEdit { background: transparent; }
+        QComboBox QAbstractItemView { color: palette(text); background: palette(base); selection-background-color: palette(highlight); selection-color: palette(highlighted-text); }
+    )"));
+
+    const auto widgets = QApplication::allWidgets();
+    for (QWidget *widget : widgets) {
+        if (!widget)
+            continue;
+        QFont font = widget->font();
+        const qreal pointSize = font.pointSizeF();
+        if (pointSize > 0.0)
+            font.setPointSizeF(qBound<qreal>(6.0, pointSize * ratio, 96.0));
+        widget->setFont(font);
+        if (QStyle *style = widget->style()) {
+            style->unpolish(widget);
+            style->polish(widget);
+        }
+        widget->updateGeometry();
+        widget->update();
+    }
+
     emit themeChanged(id);
 }
 

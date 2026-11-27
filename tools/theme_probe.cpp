@@ -3,11 +3,15 @@
 #include <QFileInfo>
 #include <QTimer>
 #include <QEventLoop>
+#include <QComboBox>
+#include <cstdio>
 #include <cstdio>
 
 #include "app/MainWindow.h"
 #include "library/LibraryManager.h"
 #include "settings/ThemeManager.h"
+#include "settings/SettingsManager.h"
+#include "settings/SettingsDialog.h"
 
 using namespace pano;
 
@@ -66,6 +70,26 @@ int main(int argc, char **argv)
     check(window->openBook(bookId), "open book");
     waitFor(900);
     window->grab().save(QStringLiteral("build/probe/theme-reader.png"));
+    SettingsManager dialogSettings;
+    dialogSettings.load();
+    SettingsDialog dialog(&dialogSettings, window->findChild<ThemeManager *>(), nullptr);
+    dialog.show();
+    waitFor(120);
+    dialog.grab().save(QStringLiteral("build/probe/settings-dialog.png"));
+    const QString originalTheme = dialogSettings.settings().themeKey;
+    for (QComboBox *combo : dialog.findChildren<QComboBox *>()) {
+        const int warmIndex = combo->findData(QStringLiteral("warm"));
+        if (warmIndex >= 0) {
+            combo->setCurrentIndex(warmIndex);
+            break;
+        }
+    }
+    waitFor(80);
+    check(qApp->styleSheet().contains(QStringLiteral("#f2e9dc")), "settings theme preview");
+    dialog.reject();
+    waitFor(80);
+    check(dialogSettings.settings().themeKey == originalTheme, "settings cancel restores theme key");
+    check(qApp->styleSheet().contains(QStringLiteral("#f4f6f9")), "settings cancel restores appearance");
     if (themes) {
         themes->setCurrentTheme(ThemeId::ModernLight, qApp);
         waitFor(100);

@@ -43,7 +43,7 @@ void SettingsManager::load()
             const QString theme = root.value(QStringLiteral("theme")).toString();
             if (!theme.isEmpty())
                 m_settings.themeKey = theme;
-            m_settings.uiFontSize = qBound(8, root.value(QStringLiteral("ui_font_size")).toInt(10), 18);
+            m_settings.uiFontSize = qBound(8, root.value(QStringLiteral("ui_font_size")).toInt(11), 18);
             m_settings.restoreLastLibrary =
                 root.value(QStringLiteral("restore_last_library")).toBool(true);
             m_settings.restoreOpenTabs = root.value(QStringLiteral("restore_open_tabs")).toBool(true);

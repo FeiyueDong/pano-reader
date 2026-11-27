@@ -65,6 +65,11 @@
 - `deleted_at` 为 `null` 表示未删除；字符串表示软删除时间。软删除不删除书籍目录、
   标注、笔记或拷贝的 PDF。
 - 目录缺失只产生诊断信息，不自动删除索引条目。
+- 永久删除仅接受回收站中的书；实现先把书籍目录移入书库根目录下的
+  `.pending-delete/` 隔离区，并在其中写入操作标记。索引、书架、阅读状态与历史全部
+  成功写入后才清理隔离目录；任一步失败会回滚。启动/打开书库时扫描 .pending-delete
+  标记，未提交的删除恢复原目录，已提交的删除清理隔离内容。该目录是内部恢复数据，
+  不属于用户可见书库内容。
 
 ## 4. `document.json`
 
@@ -161,8 +166,11 @@
 | `highlighter` | 荧光笔路径 | `points` |
 | `note_point` | 定位笔记 | `point` |
 
-- `polygons` 是文字选区的多边形数组，每个多边形至少 3 个点；每个文字选区保留 PDF
-  文本索引 `text_start`/`text_end` 与摘录 `text`，用于重新打开后保持语义。
+- `polygons` 是文字选区的原始多边形数组，每个多边形至少 3 个点；每个文字选区保留
+  PDF 文本索引 `text_start`/`text_end` 与摘录 `text`，用于重新打开后保持语义。
+  写入时保留 PDF 引擎返回的原始选区多边形，不把合并后的显示几何写回文件；渲染、
+  命中和定位时由 `TextSelectionGeometry` 在内存中按行合并，避免把词间距误判为永久
+  几何。
 - `points`、`polygons` 中每个点为 `[x, y]`。
 - 不再保存重复的 `rect`；矩形由几何字段推导，避免同一坐标出现两个权威来源。
 - 兼容读取旧字段别名：`highlight`、`text_underline`、`text_strikeout`、
@@ -175,6 +183,10 @@
 - `fill_color`：`#AARRGGBB` 或 `null`。
 - `opacity`：`0..1`。
 - `blend_mode`：`normal` 或 `multiply`。
+- `line_style`：可选，`solid`（默认）、`dash`、`dot`、`dash_dot`、`dash_dot_dot`；
+  旧文件缺省按 `solid` 读取。
+- `stroke_enabled`：可选布尔值，默认 `true`；仅当为 `false` 时写入，表示不描边
+  （填充仍可保留）。
 
 ### 6.3 笔记
 
@@ -241,7 +253,8 @@
 - `workspace.json`：`format: pano-settings-workspace`，包含上次书库路径、上次书籍 ID、
   打开书籍 ID 列表、书库三栏和阅读器左右栏的宽度与可见性。
 - `tools.json`：`format: pano-tool-presets`，按工具保存新标注预设；不属于书库，不随
-  书库分享。字段与该工具的 `AnnotationStyle` 一致，缺省工具使用内置默认值。
+  书库分享。字段与该工具的 `AnnotationStyle` 一致（含 `line_style` 与
+  `stroke_enabled`），缺省工具使用内置默认值。
 - `sources.json`：`format: pano-local-sources`，按书库 ID 保存映射模式书籍的本机源文件
   覆盖路径：
 

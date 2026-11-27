@@ -1,4 +1,5 @@
 #include "Annotation.h"
+#include "AnnotationGeometry.h"
 
 #include <QDateTime>
 #include <QJsonArray>
@@ -99,14 +100,8 @@ QRectF Annotation::bounds() const
     case AnnotationType::Line:
         return QRectF(p1, p2).normalized();
     case AnnotationType::Pencil:
-    case AnnotationType::Highlighter: {
-        if (path.isEmpty())
-            return QRectF();
-        QRectF result(path.first(), QSizeF(0.0, 0.0));
-        for (const QPointF &point : path)
-            result |= QRectF(point, QSizeF(0.0, 0.0));
-        return result;
-    }
+    case AnnotationType::Highlighter:
+        return pathBounds(path);
     case AnnotationType::NotePoint:
         return QRectF(rect.topLeft(), QSizeF(0.0, 0.0));
     default:
@@ -131,31 +126,21 @@ void Annotation::setBounds(const QRectF &newBounds)
         return;
 
     const QRectF oldBounds = bounds();
-    if (oldBounds.width() <= 0.0 || oldBounds.height() <= 0.0) {
-        if (type == AnnotationType::Line) {
-            const QPointF delta = newBounds.topLeft() - oldBounds.topLeft();
-            translate(delta);
-        }
+    if (oldBounds.isNull())
         return;
-    }
-
-    const qreal sx = newBounds.width() / oldBounds.width();
-    const qreal sy = newBounds.height() / oldBounds.height();
-    const auto mapPoint = [&](const QPointF &point) {
-        return QPointF(newBounds.x() + (point.x() - oldBounds.x()) * sx,
-                       newBounds.y() + (point.y() - oldBounds.y()) * sy);
-    };
 
     if (type == AnnotationType::Line) {
-        p1 = mapPoint(p1);
-        p2 = mapPoint(p2);
-        rect = QRectF(p1, p2).normalized();
+        const QVector<QPointF> mapped = mapPointsToBounds({p1, p2}, oldBounds, newBounds);
+        if (mapped.size() == 2) {
+            p1 = mapped.at(0);
+            p2 = mapped.at(1);
+            rect = QRectF(p1, p2).normalized();
+        }
     } else if (isPathType()) {
-        for (QPointF &point : path)
-            point = mapPoint(point);
-        rect = newBounds;
+        path = mapPointsToBounds(path, oldBounds, newBounds);
+        rect = pathBounds(path);
     } else {
-        rect = newBounds;
+        rect = newBounds.normalized();
     }
 }
 
@@ -207,6 +192,9 @@ QJsonObject Annotation::toJson() const
                        style.hasFill() ? QJsonValue(colorToString(style.fillColor)) : QJsonValue(QJsonValue::Null));
     styleObject.insert(QStringLiteral("opacity"), style.opacity);
     styleObject.insert(QStringLiteral("blend_mode"), blendModeName(style.blend));
+    styleObject.insert(QStringLiteral("line_style"), lineStyleName(style.lineStyle));
+    if (!style.strokeEnabled)
+        styleObject.insert(QStringLiteral("stroke_enabled"), false);
     root.insert(QStringLiteral("style"), styleObject);
 
     root.insert(QStringLiteral("created_at"), createdAt);
@@ -322,18 +310,13 @@ bool Annotation::fromJson(const QJsonObject &object, Annotation *out, QString *e
         const QJsonArray points = geometry.value(QStringLiteral("points")).toArray();
         if (points.size() < 1)
             return fail(QStringLiteral("标注 %1 的路径为空").arg(result.id));
-        QRectF bounds;
-        bool hasBounds = false;
         for (const QJsonValue &pointValue : points) {
             QPointF point;
             if (!readPoint(pointValue, &point))
                 return fail(QStringLiteral("标注 %1 的路径点无效").arg(result.id));
             result.path.append(point);
-            const QRectF pointBounds(point, QSizeF(0.0, 0.0));
-            bounds = hasBounds ? bounds.united(pointBounds) : pointBounds;
-            hasBounds = true;
         }
-        result.rect = bounds;
+        result.rect = pathBounds(result.path);
     } else if (!readRect(&result.rect)) {
         return fail(QStringLiteral("标注 %1 的几何矩形无效").arg(result.id));
     }
@@ -373,6 +356,14 @@ bool Annotation::fromJson(const QJsonObject &object, Annotation *out, QString *e
     const QString blend = styleObject.value(QStringLiteral("blend_mode")).toString();
     if (!blend.isEmpty() && !blendModeFromString(blend, &result.style.blend))
         return fail(QStringLiteral("标注 %1 的混合模式无效：%2").arg(result.id, blend));
+
+    const QString lineStyleValue = styleObject.value(QStringLiteral("line_style")).toString();
+    if (!lineStyleValue.isEmpty()
+        && !lineStyleFromString(lineStyleValue, &result.style.lineStyle)) {
+        return fail(QStringLiteral("标注 %1 的线型无效：%2").arg(result.id, lineStyleValue));
+    }
+    result.style.strokeEnabled =
+        styleObject.value(QStringLiteral("stroke_enabled")).toBool(true);
 
     result.createdAt = object.value(QStringLiteral("created_at")).toString();
     result.modifiedAt = object.value(QStringLiteral("modified_at")).toString();
@@ -481,6 +472,77 @@ bool blendModeFromString(const QString &name, BlendMode *mode)
         return true;
     }
     return false;
+}
+
+QString lineStyleName(LineStyle style)
+{
+    switch (style) {
+    case LineStyle::Dash:
+        return QStringLiteral("dash");
+    case LineStyle::Dot:
+        return QStringLiteral("dot");
+    case LineStyle::DashDot:
+        return QStringLiteral("dash_dot");
+    case LineStyle::DashDotDot:
+        return QStringLiteral("dash_dot_dot");
+    case LineStyle::Solid:
+    default:
+        return QStringLiteral("solid");
+    }
+}
+
+QString lineStyleDisplayName(LineStyle style)
+{
+    switch (style) {
+    case LineStyle::Dash:
+        return QStringLiteral("虚线");
+    case LineStyle::Dot:
+        return QStringLiteral("点线");
+    case LineStyle::DashDot:
+        return QStringLiteral("点划线");
+    case LineStyle::DashDotDot:
+        return QStringLiteral("双点划线");
+    case LineStyle::Solid:
+    default:
+        return QStringLiteral("实线");
+    }
+}
+
+bool lineStyleFromString(const QString &name, LineStyle *style)
+{
+    LineStyle value = LineStyle::Solid;
+    if (name == QLatin1String("solid"))
+        value = LineStyle::Solid;
+    else if (name == QLatin1String("dash"))
+        value = LineStyle::Dash;
+    else if (name == QLatin1String("dot"))
+        value = LineStyle::Dot;
+    else if (name == QLatin1String("dash_dot"))
+        value = LineStyle::DashDot;
+    else if (name == QLatin1String("dash_dot_dot"))
+        value = LineStyle::DashDotDot;
+    else
+        return false;
+    if (style)
+        *style = value;
+    return true;
+}
+
+Qt::PenStyle toPenStyle(LineStyle style)
+{
+    switch (style) {
+    case LineStyle::Dash:
+        return Qt::DashLine;
+    case LineStyle::Dot:
+        return Qt::DotLine;
+    case LineStyle::DashDot:
+        return Qt::DashDotLine;
+    case LineStyle::DashDotDot:
+        return Qt::DashDotDotLine;
+    case LineStyle::Solid:
+    default:
+        return Qt::SolidLine;
+    }
 }
 
 QString nowIsoUtc()

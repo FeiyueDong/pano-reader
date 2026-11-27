@@ -26,6 +26,7 @@ public:
     enum class Tool {
         Select,
         Hand,
+        RegionSelect,
         TextSelect,
         Highlight,
         Underline,
@@ -85,11 +86,20 @@ public:
     void deleteAnnotation(const QString &annotationId, bool confirmed = false);
     void deleteSelected();
     void applyStyleToSelected(const AnnotationStyle &style);
+    void applyStyleToAnnotation(const QString &annotationId, const AnnotationStyle &style);
     void setAnnotationNote(const QString &annotationId, const AnnotationNote &note);
     void setSelectionOverlayVisible(bool visible);
     void copySelectedText();
 
     QString selectedText() const;
+    QString createTextAnnotationFromSelection(AnnotationType type, const AnnotationStyle &style);
+    QString createRegionAnnotation(bool highlighter, const AnnotationStyle &style);
+    QImage regionImage() const;
+    QRectF textSelectionViewRect() const;
+    QRectF regionViewRect() const;
+    bool hasTextSelection() const;
+    bool hasRegionSelection() const;
+    void clearTemporarySelections();
 
 signals:
     void pageChanged(int pageIndex);
@@ -100,6 +110,8 @@ signals:
     void annotationSelectionChanged(const QString &annotationId);
     void annotationsChanged();
     void documentChanged();
+    void textSelectionChanged();
+    void regionSelectionChanged();
     void noteRequested(const QString &annotationId);
     void noteDeleteRequested(const QString &annotationId);
     void openFileRequested(const QString &filePath);
@@ -114,6 +126,7 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void keyReleaseEvent(QKeyEvent *event) override;
     void scrollContentsBy(int dx, int dy) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dropEvent(QDropEvent *event) override;
@@ -122,6 +135,7 @@ private:
     enum class DragMode {
         None,
         TextSelection,
+        RegionSelection,
         DragAnnotation,
         ResizeAnnotation,
         DrawShape,
@@ -149,9 +163,14 @@ private:
     QString annotationAt(const QPointF &viewPos, int *handleIndex = nullptr) const;
     bool noteHitAtViewPos(const Annotation &annotation, const QPointF &viewPos) const;
     QPolygonF annotationViewPolygon(const Annotation &annotation, int pageIndex) const;
-    QVector<QPointF> handlePointsInPage(const QRectF &pageBounds) const;
-    QRectF resizedBounds(const QRectF &original, int handle, const QPointF &pagePoint) const;
+    QVector<QPointF> handlePointsInPage(const Annotation &annotation) const;
+    QRectF resizedBounds(const QRectF &original, int handle, const QPointF &pagePoint,
+                         bool keepAspect) const;
     void beginTextSelection(const QPointF &viewPos);
+    void beginRegionSelection(const QPointF &viewPos);
+    void updateRegionSelection(const QPointF &viewPos);
+    void finishRegionSelection();
+    bool textAtPagePoint(const QPointF &pagePoint, int pageIndex) const;
     void updateTextSelection(const QPointF &viewPos);
     void finishTextSelection();
     void beginDraw(int pageIndex, const QPointF &pagePoint);
@@ -162,6 +181,8 @@ private:
     void finishAnnotationDrag();
     void startResize(const QString &annotationId, int handle, const QPointF &viewPos);
     void createTextAnnotation(const QPdfSelection &selection, int pageIndex);
+    QString addTextAnnotation(const QPdfSelection &selection, int pageIndex,
+                              AnnotationType type, const AnnotationStyle &style);
     Annotation makeBaseAnnotation(AnnotationType type, int pageIndex) const;
     void addAnnotation(const Annotation &annotation, bool selectAfter);
     void eraseAt(const QPointF &viewPos);
@@ -201,6 +222,8 @@ private:
     bool m_textSelecting = false;
     std::optional<QPdfSelection> m_textSelection;
     int m_textSelectionPage = -1;
+    QRectF m_regionSelection;
+    int m_regionSelectionPage = -1;
 
     QPoint m_lastMouseViewPos;
 };

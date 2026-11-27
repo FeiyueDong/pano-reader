@@ -5,6 +5,7 @@
 #include <QApplication>
 #include <QBuffer>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QColorDialog>
 #include <QComboBox>
 #include <QDateTime>
@@ -29,6 +30,7 @@
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QStandardPaths>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QTabWidget>
@@ -152,6 +154,7 @@ ReaderWorkspace::ReaderWorkspace(DocumentSession *session, QWidget *parent)
     });
 
     buildUi();
+    buildFloatingToolBars();
 
     connect(m_view, &PdfView::pageChanged, this, &ReaderWorkspace::onPageChanged);
     connect(m_view, &PdfView::zoomChanged, this, &ReaderWorkspace::onZoomChanged);
@@ -167,6 +170,15 @@ ReaderWorkspace::ReaderWorkspace(DocumentSession *session, QWidget *parent)
     connect(m_view, &PdfView::noteDeleteRequested, this,
             &ReaderWorkspace::onNoteDeleteRequested);
     connect(m_view, &PdfView::statusMessage, this, &ReaderWorkspace::showStatus);
+    connect(m_view, &PdfView::textSelectionChanged, this,
+            &ReaderWorkspace::updateFloatingToolBars);
+    connect(m_view, &PdfView::regionSelectionChanged, this,
+            &ReaderWorkspace::updateFloatingToolBars);
+    connect(m_view, &PdfView::readingAnchorChanged, this,
+            &ReaderWorkspace::updateFloatingToolBars);
+    connect(m_view, &PdfView::zoomChanged, this, &ReaderWorkspace::updateFloatingToolBars);
+    connect(m_view, &PdfView::pageChanged, this, &ReaderWorkspace::updateFloatingToolBars);
+    connect(m_view, &PdfView::rotationChanged, this, &ReaderWorkspace::updateFloatingToolBars);
 
     connect(m_notePanel, &NotePanel::editRequested, this, &ReaderWorkspace::beginNoteEdit);
     connect(m_notePanel, &NotePanel::commitRequested, this, &ReaderWorkspace::commitNoteEdit);
@@ -271,6 +283,184 @@ void ReaderWorkspace::buildUi()
     });
 }
 
+void ReaderWorkspace::buildFloatingToolBars()
+{
+    QWidget *viewport = m_view->viewport();
+    auto makeButton = [](QWidget *parent, const QString &text, const QString &tip,
+                         const std::function<void()> &handler) {
+        auto *button = new QToolButton(parent);
+        button->setText(text);
+        button->setToolTip(tip);
+        button->setAutoRaise(true);
+        button->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        button->setCursor(Qt::PointingHandCursor);
+        QObject::connect(button, &QToolButton::clicked, parent, handler);
+        if (auto *layout = qobject_cast<QBoxLayout *>(parent->layout()))
+            layout->addWidget(button);
+        return button;
+    };
+
+    m_textFloat = new QWidget(viewport);
+    m_textFloat->setObjectName(QStringLiteral("textSelectionToolbar"));
+    auto *textLayout = new QHBoxLayout(m_textFloat);
+    textLayout->setContentsMargins(6, 4, 6, 4);
+    textLayout->setSpacing(2);
+    textLayout->setSizeConstraint(QLayout::SetFixedSize);
+    makeButton(m_textFloat, tr("高亮"), tr("用当前文字高亮预设创建标注"),
+               [this] { applyTextFloatingAction(0); });
+    makeButton(m_textFloat, tr("下划线"), tr("用当前下划线预设创建标注"),
+               [this] { applyTextFloatingAction(1); });
+    makeButton(m_textFloat, tr("删除线"), tr("用当前删除线预设创建标注"),
+               [this] { applyTextFloatingAction(2); });
+    makeButton(m_textFloat, tr("复制"), tr("复制选中的原文"),
+               [this] { applyTextFloatingAction(3); });
+    makeButton(m_textFloat, tr("笔记"), tr("基于选中文字创建带笔记的标注"),
+               [this] { applyTextFloatingAction(4); });
+    m_textFloat->setStyleSheet(QStringLiteral(
+        "QWidget#textSelectionToolbar { background: palette(window); border: 1px solid palette(mid); "
+        "border-radius: 6px; } QToolButton { padding: 3px 6px; }"));
+    m_textFloat->hide();
+
+    m_regionFloat = new QWidget(viewport);
+    m_regionFloat->setObjectName(QStringLiteral("regionSelectionToolbar"));
+    auto *regionLayout = new QHBoxLayout(m_regionFloat);
+    regionLayout->setContentsMargins(6, 4, 6, 4);
+    regionLayout->setSpacing(2);
+    regionLayout->setSizeConstraint(QLayout::SetFixedSize);
+    makeButton(m_regionFloat, tr("复制图片"), tr("把框选区域复制为图片"),
+               [this] { applyRegionFloatingAction(0); });
+    makeButton(m_regionFloat, tr("保存图片"), tr("把框选区域保存为 PNG"),
+               [this] { applyRegionFloatingAction(1); });
+    makeButton(m_regionFloat, tr("矩形"), tr("用当前矩形预设创建标注"),
+               [this] { applyRegionFloatingAction(2); });
+    makeButton(m_regionFloat, tr("区域高亮"), tr("创建无边框的半透明区域高亮"),
+               [this] { applyRegionFloatingAction(3); });
+    makeButton(m_regionFloat, tr("笔记"), tr("基于框选区域创建笔记"),
+               [this] { applyRegionFloatingAction(4); });
+    m_regionFloat->setStyleSheet(QStringLiteral(
+        "QWidget#regionSelectionToolbar { background: palette(window); border: 1px solid palette(mid); "
+        "border-radius: 6px; } QToolButton { padding: 3px 6px; }"));
+    m_regionFloat->hide();
+}
+
+void ReaderWorkspace::updateFloatingToolBars()
+{
+    auto place = [this](QWidget *bar, const QRectF &viewRect) {
+        if (!bar)
+            return;
+        QWidget *viewport = m_view->viewport();
+        if (viewRect.isEmpty() || !QRectF(viewport->rect()).intersects(viewRect)) {
+            bar->hide();
+            return;
+        }
+        bar->adjustSize();
+        const QPoint preferred = viewRect.bottomRight().toPoint() + QPoint(8, 8);
+        int x = qBound(4, preferred.x(), qMax(4, viewport->width() - bar->width() - 4));
+        int y = qBound(4, preferred.y(), qMax(4, viewport->height() - bar->height() - 4));
+        bar->move(x, y);
+        bar->raise();
+        bar->show();
+    };
+    if (m_view->tool() == PdfView::Tool::Select || m_view->tool() == PdfView::Tool::TextSelect)
+        place(m_textFloat, m_view->textSelectionViewRect());
+    else
+        m_textFloat->hide();
+    place(m_regionFloat, m_view->regionViewRect());
+}
+
+void ReaderWorkspace::applyTextFloatingAction(int action)
+{
+    if (!m_view->hasTextSelection())
+        return;
+    if (action == 3) {
+        QApplication::clipboard()->setText(m_view->selectedText());
+        showStatus(tr("已复制选中文字"));
+        return;
+    }
+    AnnotationType type = AnnotationType::Highlight;
+    QString preset = QStringLiteral("text_highlight");
+    if (action == 1) {
+        type = AnnotationType::Underline;
+        preset = QStringLiteral("underline");
+    } else if (action == 2) {
+        type = AnnotationType::StrikeOut;
+        preset = QStringLiteral("strikeout");
+    }
+    const AnnotationStyle style = m_session->toolPresets()->style(preset);
+    const QString id = m_view->createTextAnnotationFromSelection(type, style);
+    if (id.isEmpty())
+        return;
+    if (action == 4)
+        onNoteRequested(id);
+    else
+        showStatus(tr("已在选中文字上创建标注"));
+}
+
+void ReaderWorkspace::applyRegionFloatingAction(int action)
+{
+    if (!m_view->hasRegionSelection())
+        return;
+    if (action == 0) {
+        QApplication::clipboard()->setImage(m_view->regionImage());
+        showStatus(tr("已复制框选区域图片"));
+        return;
+    }
+    if (action == 1) {
+        const QString directory = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
+        const QString path = QFileDialog::getSaveFileName(
+            this, tr("保存框选区域"), QDir(directory).filePath(QStringLiteral("pano-region.png")),
+            tr("PNG 图片 (*.png)"));
+        if (path.isEmpty())
+            return;
+        if (!m_view->regionImage().save(path, "PNG"))
+            QMessageBox::warning(this, tr("保存失败"), tr("无法写入图片：%1").arg(path));
+        else
+            showStatus(tr("已保存框选区域"));
+        return;
+    }
+    QString preset = QStringLiteral("rectangle");
+    AnnotationStyle style = m_session->toolPresets()->style(preset);
+    bool highlighter = false;
+    if (action == 3) {
+        highlighter = true;
+        style.fillColor = QColor(QStringLiteral("#FFE066"));
+        style.opacity = 0.45;
+        style.blend = BlendMode::Multiply;
+        style.strokeEnabled = false;
+    } else if (action == 4) {
+        highlighter = true;
+        style.fillColor = QColor(QStringLiteral("#FFE066"));
+        style.opacity = 0.45;
+        style.blend = BlendMode::Multiply;
+        style.strokeEnabled = false;
+    }
+    QImage regionImage;
+    QString imageRelative;
+    if (action == 4 && m_session) {
+        regionImage = m_view->regionImage();
+        if (!regionImage.isNull()) {
+            QByteArray bytes;
+            QBuffer buffer(&bytes);
+            buffer.open(QIODevice::WriteOnly);
+            regionImage.save(&buffer, "PNG");
+            QString error;
+            if (!m_session->writeAsset(QStringLiteral("capture"), QStringLiteral("png"), bytes,
+                                       &imageRelative, &error))
+                showStatus(error);
+        }
+    }
+    const QString id = m_view->createRegionAnnotation(highlighter, style);
+    if (id.isEmpty())
+        return;
+    if (action == 4) {
+        onNoteRequested(id);
+        if (!imageRelative.isEmpty())
+            m_notePanel->insertMarkdown(QStringLiteral("![区域截图](%1)\n").arg(imageRelative));
+    } else {
+        showStatus(action == 3 ? tr("已创建区域高亮") : tr("已创建矩形标注"));
+    }
+}
+
 QToolBar *ReaderWorkspace::buildPrimaryToolBar()
 {
     auto *bar = new QToolBar(this);
@@ -317,7 +507,7 @@ QToolBar *ReaderWorkspace::buildPrimaryToolBar()
 
     addTool(PdfView::Tool::Select, QStringLiteral("mouse-pointer-2"), tr("选择/移动"));
     addTool(PdfView::Tool::Hand, QStringLiteral("hand"), tr("抓手"));
-    addTool(PdfView::Tool::TextSelect, QStringLiteral("text-cursor"), tr("文本选择"));
+    addTool(PdfView::Tool::RegionSelect, QStringLiteral("scan"), tr("框选"));
     bar->addSeparator();
     addTool(PdfView::Tool::Highlight, QStringLiteral("highlighter"), tr("文本高亮"));
     addTool(PdfView::Tool::Underline, QStringLiteral("underline"), tr("下划线"));
@@ -394,11 +584,29 @@ QToolBar *ReaderWorkspace::buildContextToolBar()
     m_widthSpin->setSingleStep(0.25);
     m_widthSpin->setDecimals(2);
     m_widthSpin->setSuffix(tr(" pt"));
-    m_widthSpin->setKeyboardTracking(false);
+    m_widthSpin->setKeyboardTracking(true);
     widthLayout->addWidget(m_widthSpin);
-    connect(m_widthSpin, &QDoubleSpinBox::editingFinished, this,
-            &ReaderWorkspace::scheduleStyleApply);
+    connect(m_widthSpin, &QDoubleSpinBox::valueChanged, this, [this] { scheduleStyleApply(); });
     layout->addWidget(m_widthWidget);
+
+    m_lineStyleWidget = new QWidget(m_contextWidget);
+    auto *lineStyleLayout = new QHBoxLayout(m_lineStyleWidget);
+    lineStyleLayout->setContentsMargins(0, 0, 0, 0);
+    lineStyleLayout->setSpacing(4);
+    lineStyleLayout->addWidget(new QLabel(tr("线型"), m_lineStyleWidget));
+    m_lineStyleCombo = new QComboBox(m_lineStyleWidget);
+    for (LineStyle style : {LineStyle::Solid, LineStyle::Dash, LineStyle::Dot,
+                            LineStyle::DashDot, LineStyle::DashDotDot}) {
+        m_lineStyleCombo->addItem(lineStyleDisplayName(style), static_cast<int>(style));
+    }
+    lineStyleLayout->addWidget(m_lineStyleCombo);
+    m_strokeCheck = new QCheckBox(tr("描边"), m_lineStyleWidget);
+    m_strokeCheck->setChecked(true);
+    lineStyleLayout->addWidget(m_strokeCheck);
+    connect(m_strokeCheck, &QCheckBox::toggled, this, [this] { scheduleStyleApply(); });
+    connect(m_lineStyleCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this] { scheduleStyleApply(); });
+    layout->addWidget(m_lineStyleWidget);
 
     m_opacityWidget = new QWidget(m_contextWidget);
     auto *opacityLayout = new QHBoxLayout(m_opacityWidget);
@@ -414,7 +622,6 @@ QToolBar *ReaderWorkspace::buildContextToolBar()
     opacityLayout->addWidget(m_opacityValue);
     connect(m_opacitySlider, &QSlider::valueChanged, this, [this](int value) {
         m_opacityValue->setText(QStringLiteral("%1%").arg(value));
-        scheduleStyleApply();
     });
     connect(m_opacitySlider, &QSlider::sliderReleased, this,
             &ReaderWorkspace::applyStyleFromControls);
@@ -844,6 +1051,7 @@ void ReaderWorkspace::onSelectionChanged(const QString &annotationId)
 {
     if (m_applyingSelection)
         return;
+    flushPendingStyle();
     if (isEditingNote() && m_editingId != annotationId)
         commitNoteEdit();
 
@@ -851,8 +1059,8 @@ void ReaderWorkspace::onSelectionChanged(const QString &annotationId)
     updateDetailPanel();
     updateNotePanel();
     updateContextToolBar();
-    if (!annotationId.isEmpty())
-        m_view->revealAnnotation(annotationId);
+    // Selection is deliberately not navigation.  The annotation list, outline,
+    // thumbnails and explicit "reveal" actions call revealAnnotation().
 }
 
 void ReaderWorkspace::onNoteRequested(const QString &annotationId)
@@ -1050,6 +1258,8 @@ void ReaderWorkspace::stopNoteTimers()
 
 void ReaderWorkspace::onToolChanged(PdfView::Tool tool)
 {
+    updateFloatingToolBars();
+    flushPendingStyle();
     updateToolActions();
     if (tool == PdfView::Tool::Select) {
         updateContextToolBar();
@@ -1076,6 +1286,8 @@ QString ReaderWorkspace::presetIdFor(PdfView::Tool tool) const
     switch (tool) {
     case PdfView::Tool::Select:
         return QStringLiteral("select");
+    case PdfView::Tool::RegionSelect:
+        return QStringLiteral("region_highlight");
     case PdfView::Tool::TextSelect:
         return QStringLiteral("text");
     case PdfView::Tool::Highlight:
@@ -1110,7 +1322,7 @@ void ReaderWorkspace::applyToolPreset(PdfView::Tool tool)
     if (id.isEmpty() || !m_session || !m_session->toolPresets())
         return;
     if (tool == PdfView::Tool::Select || tool == PdfView::Tool::TextSelect
-        || tool == PdfView::Tool::Eraser)
+        || tool == PdfView::Tool::RegionSelect || tool == PdfView::Tool::Eraser)
         return;
     m_view->setDefaultStyle(m_session->toolPresets()->style(id));
 }
@@ -1134,6 +1346,10 @@ AnnotationStyle ReaderWorkspace::styleFromControls() const
         style.strokeWidthPt = m_widthSpin->value();
     if (m_opacitySlider)
         style.opacity = m_opacitySlider->value() / 100.0;
+    if (m_lineStyleCombo)
+        style.lineStyle = static_cast<LineStyle>(m_lineStyleCombo->currentData().toInt());
+    if (m_strokeCheck)
+        style.strokeEnabled = m_strokeCheck->isChecked();
     if (m_blendCombo)
         style.blend = m_blendCombo->currentData().toString() == QStringLiteral("multiply")
                           ? BlendMode::Multiply
@@ -1157,6 +1373,13 @@ void ReaderWorkspace::setControlsFromStyle(const AnnotationStyle &style)
         m_opacitySlider->setValue(qBound(5, qRound(style.opacity * 100.0), 100));
         if (m_opacityValue)
             m_opacityValue->setText(QStringLiteral("%1%").arg(m_opacitySlider->value()));
+    }
+    if (m_strokeCheck)
+        m_strokeCheck->setChecked(style.strokeEnabled);
+    if (m_lineStyleCombo) {
+        const int index = m_lineStyleCombo->findData(static_cast<int>(style.lineStyle));
+        if (index >= 0)
+            m_lineStyleCombo->setCurrentIndex(index);
     }
     if (m_blendCombo)
         m_blendCombo->setCurrentIndex(style.blend == BlendMode::Multiply ? 1 : 0);
@@ -1207,8 +1430,31 @@ void ReaderWorkspace::chooseFillColor()
 
 void ReaderWorkspace::scheduleStyleApply()
 {
-    if (!m_syncingControls && m_styleTimer)
+    if (m_syncingControls || m_applyingStyle)
+        return;
+    const PdfView::Tool tool = m_view->tool();
+    m_styleTargetObject = tool == PdfView::Tool::Select && currentAnnotation();
+    m_styleTargetId = m_styleTargetObject ? currentAnnotation()->id : QString();
+    m_styleTargetTool = presetIdFor(tool);
+    m_styleSnapshot = styleFromControls();
+    m_styleSnapshotValid = true;
+    if (m_styleTimer)
         m_styleTimer->start();
+}
+
+void ReaderWorkspace::applyStyleFromControls()
+{
+    if (m_syncingControls || m_applyingStyle)
+        return;
+    if (!m_styleSnapshotValid) {
+        const PdfView::Tool tool = m_view->tool();
+        m_styleTargetObject = tool == PdfView::Tool::Select && currentAnnotation();
+        m_styleTargetId = m_styleTargetObject ? currentAnnotation()->id : QString();
+        m_styleTargetTool = presetIdFor(tool);
+        m_styleSnapshot = styleFromControls();
+        m_styleSnapshotValid = true;
+    }
+    flushPendingStyle();
 }
 
 void ReaderWorkspace::schedulePresetSave()
@@ -1217,26 +1463,32 @@ void ReaderWorkspace::schedulePresetSave()
         m_presetTimer->start();
 }
 
-void ReaderWorkspace::applyStyleFromControls()
+void ReaderWorkspace::flushPendingStyle()
 {
-    if (m_syncingControls || m_applyingStyle)
+    if (!m_styleSnapshotValid)
         return;
+    if (m_styleTimer)
+        m_styleTimer->stop();
+
+    const QString targetId = m_styleTargetId;
+    const QString targetTool = m_styleTargetTool;
+    const AnnotationStyle style = m_styleSnapshot;
+    const bool objectTarget = m_styleTargetObject;
+    m_styleSnapshotValid = false;
+    m_styleTargetId.clear();
+    m_styleTargetTool.clear();
+
     m_applyingStyle = true;
-    const AnnotationStyle style = styleFromControls();
-    if (m_view->tool() == PdfView::Tool::Select) {
-        if (currentAnnotation()) {
-            m_view->applyStyleToSelected(style);
+    if (objectTarget && !targetId.isEmpty()) {
+        m_view->applyStyleToAnnotation(targetId, style);
+        if (m_view->selectedAnnotationId() == targetId) {
             updateDetailPanel();
             updateContextToolBar();
         }
-        m_applyingStyle = false;
-        return;
-    }
-
-    const QString id = presetIdFor(m_view->tool());
-    if (!id.isEmpty() && m_session && m_session->toolPresets()) {
-        m_session->toolPresets()->setStyle(id, style);
-        m_view->setDefaultStyle(style);
+    } else if (!targetTool.isEmpty() && m_session && m_session->toolPresets()) {
+        m_session->toolPresets()->setStyle(targetTool, style);
+        if (presetIdFor(m_view->tool()) == targetTool)
+            m_view->setDefaultStyle(style);
         schedulePresetSave();
     }
     m_applyingStyle = false;
@@ -1258,6 +1510,7 @@ void ReaderWorkspace::updateContextToolBar()
     bool width = false;
     bool opacity = false;
     bool blend = false;
+    bool lineStyle = false;
     QString hint;
     if (tool == PdfView::Tool::TextSelect || tool == PdfView::Tool::Hand) {
         hint = tool == PdfView::Tool::Hand ? tr("拖动画布滚动手感：按住左键移动页面。")
@@ -1297,6 +1550,15 @@ void ReaderWorkspace::updateContextToolBar()
         color = true;
         fill = true;
         width = true;
+        lineStyle = true;
+        opacity = true;
+        blend = true;
+    } else if (tool == PdfView::Tool::Line
+               || (objectMode && annotation->type == AnnotationType::Line)) {
+        hint = objectMode ? tr("编辑选中直线") : tr("拖动绘制直线");
+        color = true;
+        width = true;
+        lineStyle = true;
         opacity = true;
         blend = true;
     } else {
@@ -1312,6 +1574,8 @@ void ReaderWorkspace::updateContextToolBar()
     m_colorWidget->setVisible(color);
     m_fillWidget->setVisible(fill);
     m_widthWidget->setVisible(width);
+    if (m_lineStyleWidget)
+        m_lineStyleWidget->setVisible(lineStyle);
     m_opacityWidget->setVisible(opacity);
     m_blendWidget->setVisible(blend);
     if (!color && hint.isEmpty())

@@ -11,6 +11,7 @@
 #include <QPdfDocument>
 #include <QRegularExpression>
 #include <QSet>
+#include <QDebug>
 
 #include <algorithm>
 
@@ -73,6 +74,7 @@ bool LibraryManager::openLibrary(const QString &rootPath, QString *errorMessage)
     if (!m_store->open(rootPath, &data, errorMessage))
         return false;
     m_data = data;
+    recoverPendingDeletes();
     emit libraryChanged();
     emit libraryOpened();
     return true;
@@ -369,29 +371,169 @@ bool LibraryManager::deletePermanently(const QString &bookId, QString *errorMess
         return false;
     }
     const BookRecord record = m_data.books.at(index);
+    if (record.deletedAt.isEmpty()) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("只能永久删除回收站中的书籍。请先将书籍移入回收站。");
+        return false;
+    }
+
     const QString directory = m_store->absoluteBookDirectory(record.directory);
-    if (!directory.isEmpty() && QFileInfo::exists(directory)
-        && m_store->isManagedBookDirectory(directory)) {
-        if (!QDir(directory).removeRecursively()) {
-            if (errorMessage)
-                *errorMessage = QStringLiteral("无法删除书籍目录：%1").arg(directory);
+    const bool hasDirectory = !directory.isEmpty() && QFileInfo(directory).isDir();
+    if (hasDirectory && !m_store->isManagedBookDirectory(directory)) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("拒绝删除书库受控目录之外的路径。");
+        return false;
+    }
+
+    const LibraryData before = m_data;
+    QString quarantinePath;
+    QString operationId;
+    QString markerPath;
+    if (hasDirectory) {
+        const QString pendingRoot = QDir(m_store->rootPath()).filePath(QStringLiteral(".pending-delete"));
+        if (!ensureDirectory(pendingRoot, errorMessage)) {
+            return false;
+        }
+        operationId = newStableId();
+        quarantinePath = QDir(pendingRoot).filePath(operationId);
+        markerPath = QDir(pendingRoot).filePath(operationId + QStringLiteral(".operation.json"));
+        QJsonObject marker;
+        marker.insert(QStringLiteral("format"), QStringLiteral("pano-delete-operation"));
+        marker.insert(QStringLiteral("schema_version"), 1);
+        marker.insert(QStringLiteral("operation_id"), operationId);
+        marker.insert(QStringLiteral("book_id"), bookId);
+        marker.insert(QStringLiteral("directory"), record.directory);
+        marker.insert(QStringLiteral("quarantine"), quarantinePath);
+        marker.insert(QStringLiteral("stage"), QStringLiteral("prepared"));
+        marker.insert(QStringLiteral("created_at"), utcNowIso());
+        if (!writeJsonObjectAtomic(markerPath, marker, errorMessage)) {
+            return false;
+        }
+        if (!QDir().rename(directory, quarantinePath)) {
+            QFile::remove(markerPath);
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("无法将书籍目录移入隔离区，已取消删除：%1")
+                                    .arg(directory);
+            }
             return false;
         }
     }
+
     m_data.books.removeAt(index);
     for (ShelfRecord &shelf : m_data.shelves)
         shelf.bookIds.removeAll(bookId);
     m_data.reading.remove(bookId);
     m_data.history.remove(bookId);
 
-    if (!persistLibrary(errorMessage) || !persistShelves(errorMessage)) {
+    QString writeError;
+    const bool persisted = persistLibrary(&writeError) && persistShelves(&writeError)
+                           && m_store->saveReadingState(m_data, &writeError)
+                           && m_store->saveHistory(m_data, &writeError);
+    if (!persisted) {
+        m_data = before;
+        QString recoveryError;
+        if (!quarantinePath.isEmpty() && QFileInfo(quarantinePath).isDir()
+            && !QFileInfo(directory).exists()) {
+            if (!QDir().rename(quarantinePath, directory))
+                recoveryError = QStringLiteral("无法恢复隔离目录：%1").arg(directory);
+        }
+        QString ignore;
+        persistLibrary(&ignore);
+        persistShelves(&ignore);
+        m_store->saveReadingState(m_data, &ignore);
+        m_store->saveHistory(m_data, &ignore);
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("永久删除失败，已取消本次操作：%1").arg(writeError);
+            if (!recoveryError.isEmpty())
+                *errorMessage += QStringLiteral("；%1").arg(recoveryError);
+        }
         return false;
     }
-    QString stateError;
-    m_store->saveReadingState(m_data, &stateError);
-    m_store->saveHistory(m_data, &stateError);
+
+    if (!markerPath.isEmpty()) {
+        QJsonObject marker;
+        marker.insert(QStringLiteral("format"), QStringLiteral("pano-delete-operation"));
+        marker.insert(QStringLiteral("schema_version"), 1);
+        marker.insert(QStringLiteral("operation_id"), operationId);
+        marker.insert(QStringLiteral("book_id"), bookId);
+        marker.insert(QStringLiteral("directory"), record.directory);
+        marker.insert(QStringLiteral("quarantine"), quarantinePath);
+        marker.insert(QStringLiteral("stage"), QStringLiteral("committed"));
+        marker.insert(QStringLiteral("created_at"), utcNowIso());
+        QString markerError;
+        writeJsonObjectAtomic(markerPath, marker, &markerError);
+        if (QFileInfo(quarantinePath).isDir() && !QDir(quarantinePath).removeRecursively()) {
+            emit errorOccurred(QStringLiteral("删除已完成，但隔离目录清理失败，可稍后重试：%1")
+                                   .arg(quarantinePath));
+        } else {
+            QFile::remove(markerPath);
+        }
+    }
+
     emit libraryChanged();
     return true;
+}
+
+bool LibraryManager::restoreQuarantinedBook(const QString &quarantinePath,
+                                            const QString &originalPath,
+                                            QString *errorMessage)
+{
+    if (!QFileInfo(quarantinePath).isDir()) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("隔离目录不存在：%1").arg(quarantinePath);
+        return false;
+    }
+    if (QFileInfo::exists(originalPath)) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("原书籍目录已存在，无法恢复：%1").arg(originalPath);
+        return false;
+    }
+    if (!QDir().rename(quarantinePath, originalPath)) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("无法恢复书籍目录：%1").arg(originalPath);
+        return false;
+    }
+    return true;
+}
+
+void LibraryManager::recoverPendingDeletes()
+{
+    const QString pendingRoot = QDir(m_store->rootPath()).filePath(QStringLiteral(".pending-delete"));
+    QDir root(pendingRoot);
+    if (!root.exists())
+        return;
+    const QFileInfoList markers = root.entryInfoList({QStringLiteral("*.operation.json")},
+                                                     QDir::Files, QDir::Name);
+    for (const QFileInfo &markerFile : markers) {
+        QJsonObject marker;
+        QString error;
+        if (!readJsonObject(markerFile.absoluteFilePath(), &marker, &error))
+            continue;
+        const QString stage = marker.value(QStringLiteral("stage")).toString();
+        const QString bookId = marker.value(QStringLiteral("book_id")).toString();
+        const QString relative = marker.value(QStringLiteral("directory")).toString();
+        const QString quarantine = marker.value(QStringLiteral("quarantine")).toString();
+        const QString original = m_store->absoluteBookDirectory(relative);
+        if (stage == QStringLiteral("committed")) {
+            if (!quarantine.isEmpty())
+                QDir(quarantine).removeRecursively();
+            QFile::remove(markerFile.absoluteFilePath());
+            continue;
+        }
+        if (stage != QStringLiteral("prepared") || original.isEmpty())
+            continue;
+        if (m_data.book(bookId) && !QFileInfo::exists(original)) {
+            if (!restoreQuarantinedBook(quarantine, original, &error)) {
+                emit errorOccurred(QStringLiteral("恢复未完成的永久删除失败：%1").arg(error));
+            } else {
+                QFile::remove(markerFile.absoluteFilePath());
+            }
+        } else if (!m_data.book(bookId)) {
+            emit errorOccurred(
+                QStringLiteral("发现已移入隔离区但索引已移除的书籍记录，已保留数据等待人工检查：%1")
+                    .arg(quarantine));
+        }
+    }
 }
 
 bool LibraryManager::setSourcePath(const QString &bookId, const QString &absolutePath,

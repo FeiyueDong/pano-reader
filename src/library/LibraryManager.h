@@ -76,6 +76,9 @@ private:
     bool shelfIsDescendant(const QString &shelfId, const QString &possibleChild) const;
     bool persistLibrary(QString *errorMessage);
     bool persistShelves(QString *errorMessage);
+    void recoverPendingDeletes();
+    bool restoreQuarantinedBook(const QString &quarantinePath, const QString &originalPath,
+                                QString *errorMessage);
 
     LibraryStore *m_store = nullptr;
     LibraryData m_data;

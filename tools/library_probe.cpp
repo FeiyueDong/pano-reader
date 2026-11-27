@@ -156,6 +156,11 @@ int main(int argc, char **argv)
     check(!manager.setSourcePath(referenceId, altered, &error), QStringLiteral("different hash source rejected"));
 
     QString deleteError;
+    check(!manager.deletePermanently(bookId, &deleteError),
+          QStringLiteral("permanent delete rejects non-trash book"));
+    check(manager.moveToTrash(bookId, &deleteError), QStringLiteral("trash before permanent delete: %1").arg(deleteError));
+    check(manager.data().book(bookId) && !manager.data().book(bookId)->deletedAt.isEmpty(),
+          QStringLiteral("book marked trashed in memory"));
     check(manager.deletePermanently(bookId, &deleteError),
           QStringLiteral("permanent delete: %1").arg(deleteError));
     check(manager.bookInfo(bookId).id.isEmpty(), QStringLiteral("permanent delete removes record"));

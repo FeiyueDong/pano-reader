@@ -63,6 +63,8 @@ QJsonObject styleToJson(const AnnotationStyle &style)
                   style.hasFill() ? QJsonValue(style.fillColor.name(QColor::HexArgb)) : QJsonValue());
     object.insert(QStringLiteral("opacity"), style.opacity);
     object.insert(QStringLiteral("blend_mode"), blendModeName(style.blend));
+    object.insert(QStringLiteral("line_style"), lineStyleName(style.lineStyle));
+    object.insert(QStringLiteral("stroke_enabled"), style.strokeEnabled);
     return object;
 }
 
@@ -81,6 +83,10 @@ bool styleFromJson(const QJsonObject &object, AnnotationStyle *style)
     BlendMode blend = BlendMode::Normal;
     blendModeFromString(object.value(QStringLiteral("blend_mode")).toString(), &blend);
     result.blend = blend;
+    LineStyle lineStyle = LineStyle::Solid;
+    if (lineStyleFromString(object.value(QStringLiteral("line_style")).toString(), &lineStyle))
+        result.lineStyle = lineStyle;
+    result.strokeEnabled = object.value(QStringLiteral("stroke_enabled")).toBool(true);
     *style = result;
     return true;
 }

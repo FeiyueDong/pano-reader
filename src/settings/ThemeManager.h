@@ -36,14 +36,20 @@ public:
     static QString styleSheet(ThemeId id);
 
     ThemeId currentTheme() const { return m_current; }
+    int uiFontPointSize() const { return m_fontPointSize; }
     void setCurrentTheme(ThemeId id, QApplication *application = nullptr);
+    void setUiFontPointSize(int points);
     void apply(QApplication *application) const;
+    // Applies palette, QSS and a base font; explicit widget fonts are scaled
+    // relative to the previous base so headings keep their hierarchy.
+    void applyAppearance(ThemeId id, int fontPointSize, QApplication *application = nullptr);
 
 signals:
     void themeChanged(ThemeId id);
 
 private:
     ThemeId m_current = ThemeId::ModernLight;
+    int m_fontPointSize = 11;
 };
 
 } // namespace pano

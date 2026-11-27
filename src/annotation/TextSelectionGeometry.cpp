@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 
 namespace pano {
 
@@ -31,7 +32,7 @@ qreal angleDegrees(const QPolygonF &polygon)
     if (polygon.size() < 2)
         return 0.0;
     const QLineF edge(polygon.at(0), polygon.at(1));
-    qreal angle = std::atan2(edge.dy(), edge.dx()) * 180.0 / M_PI;
+    qreal angle = std::atan2(edge.dy(), edge.dx()) * 180.0 / std::numbers::pi;
     while (angle <= -90.0)
         angle += 180.0;
     while (angle > 90.0)
@@ -74,7 +75,7 @@ bool TextSelectionGeometry::isAxisAligned(const QPolygonF &polygon, qreal tolera
         return false;
     for (int i = 0; i < polygon.size(); ++i) {
         const QLineF edge(polygon.at(i), polygon.at((i + 1) % polygon.size()));
-        const qreal angle = std::abs(std::atan2(edge.dy(), edge.dx()) * 180.0 / M_PI);
+        const qreal angle = std::abs(std::atan2(edge.dy(), edge.dx()) * 180.0 / std::numbers::pi);
         const qreal normalized = std::min(angle, std::abs(angle - 180.0));
         if (normalized > tolerance && std::abs(normalized - 90.0) > tolerance)
             return false;
@@ -155,12 +156,24 @@ QVector<QPolygonF> TextSelectionGeometry::mergeLineBands(const QVector<QPolygonF
         QRectF band;
         qreal previousRight = 0.0;
         bool first = true;
+
+        // Estimate the ordinary spacing on this line from the selection itself.
+        // Justified text can have word gaps close to one em, while column
+        // gutters and paragraph breaks are much wider.  The limit is capped so
+        // a single unusual gap cannot glue two columns together.
+        QVector<qreal> gaps;
+        for (int i = 1; i < line.size(); ++i) {
+            const qreal gap = line.at(i).box.left() - line.at(i - 1).box.right();
+            if (gap > 0.05)
+                gaps.append(gap);
+        }
+        const qreal medianGap = gaps.isEmpty() ? 0.0 : median(gaps);
+        const qreal mergeLimit = std::max<qreal>(
+            1.5, std::min(referenceHeight * 1.2,
+                          std::max(referenceHeight * 0.8, medianGap * 2.2)));
+
         for (const GlyphBox &glyph : line) {
             const qreal gap = first ? 0.0 : glyph.box.left() - previousRight;
-            const qreal localHeight = std::max<qreal>(1.0, std::min(glyph.height, referenceHeight));
-            // Normal inter-word spaces are around 0.25–0.4 em; column gutters
-            // are far wider.  Keep a large gap as a separate band.
-            const qreal mergeLimit = std::max<qreal>(1.2, localHeight * 0.55);
             if (first || gap > mergeLimit) {
                 if (!band.isNull())
                     result.append(rectPolygon(band));
@@ -168,7 +181,7 @@ QVector<QPolygonF> TextSelectionGeometry::mergeLineBands(const QVector<QPolygonF
             } else {
                 band = unionRect(band, glyph.box);
             }
-            previousRight = glyph.box.right();
+            previousRight = std::max(previousRight, glyph.box.right());
             first = false;
         }
         if (!band.isNull())
