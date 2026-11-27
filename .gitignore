@@ -1,0 +1,9 @@
+build/
+.xmake/
+examples/build/
+*.pano/
+*.aux
+*.log
+*.out
+*.toc
+.DS_Store

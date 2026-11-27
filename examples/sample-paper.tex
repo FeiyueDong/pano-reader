@@ -1,0 +1,124 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{parskip}
+\setlength{\parskip}{0.55em}
+\title{\textbf{PANO Phase 0 Sample Document}}
+\author{PANO Project}
+\date{2026}
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This sample PDF is used to exercise continuous scrolling, text selection, highlights,
+geometric annotations, Markdown notes and offline math rendering in the PANO Phase 0 demo.
+The source PDF is read-only; all annotations are stored beside it in a \texttt{.pano} directory.
+\end{abstract}
+
+\section{Reading and Annotation}
+PANO treats the PDF as an immutable source. A highlight is not a rectangle painted over a
+screenshot: it keeps the selected text range and every selection polygon reported by the PDF
+engine. That makes the annotation meaningful when the document is reopened at another zoom
+level or with a different display.
+
+\subsection{Text marks}
+Select a sentence with the text tool and apply a highlight, underline or strike-out. The mark
+inherits the text range and the page coordinates in PDF points. Moving the window or rotating
+the view must not move the mark relative to the glyphs.
+
+\subsection{Geometric marks}
+Lines, rectangles, ellipses, pencil paths and the highlighter are editable objects. A single
+drag creates one undoable edit. The eraser deletes the topmost object in one step, and
+\texttt{Ctrl+Z} restores it.
+
+\begin{equation}
+  E = mc^2
+\end{equation}
+
+\begin{equation}
+  \int_a^b f(x)\,\mathrm{d}x \approx \sum_{i=1}^{n} f(x_i)\,\Delta x
+\end{equation}
+
+\section{Notes Anchored to the Source}
+A note is attached to an annotation instead of replacing the sentence it discusses. The note
+panel stores Markdown, and the preview supports headings, lists, tables, code spans, local
+images and math. Inline math such as $m\ddot{u}+ku=0$ and display math such as
+
+\[
+  \nabla \cdot \vec{E} = \frac{\rho}{\varepsilon_0}
+\]
+
+remain fully offline.
+
+\subsection{A small table}
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+Quantity & Symbol & Unit \\
+\midrule
+Mass & $m$ & kg \\
+Stiffness & $k$ & N/m \\
+Damping & $c$ & N$\cdot$s/m \\
+\bottomrule
+\end{tabular}
+\caption{Parameters used by the example.}
+\end{table}
+
+\section{Storage and Recovery}
+The annotation file is JSON and is committed with an atomic replace. A SHA-256 digest binds the
+data directory to the exact PDF bytes. If the digest does not match, PANO stops instead of
+silently rebinding the annotations to a different document.
+
+Every drag, stroke or erase is one command on the undo stack. Note edits are restorable as well.
+The undo history is deliberately not persisted: reopening the book gives a clean editing
+session while keeping the saved annotations.
+
+\section{Validation Checklist}
+\begin{enumerate}
+  \item Open this PDF and check that pages scroll continuously.
+  \item Zoom with \texttt{Ctrl+wheel}; the point under the cursor should stay under it.
+  \item Select text and create a highlight; rotate the view by 90 degrees.
+  \item Draw a rectangle, change its colour and opacity, then undo the change.
+  \item Attach a Markdown note, capture a page region as an image, and save.
+  \item Close and reopen the PDF; the marks and notes must return.
+\end{enumerate}
+
+\newpage
+\section{Long-form Reading Page}
+This page exists to make continuous scrolling and page jumping observable. The quick brown fox
+jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps
+over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over
+the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the
+lazy dog. The quick brown fox jumps over the lazy dog.
+
+\subsection{Selection across lines}
+Text selection is deliberately limited to one page in Phase 0. A selection that begins near the
+top of this paragraph and ends near its bottom should still produce one annotation whose
+polygons cover every selected line. Starting a drag on one page and releasing on another page is
+ignored rather than producing a corrupt cross-page object.
+
+\subsection{Mathematical text}
+The renderer used by notes is a local, deliberately small TeX subset. It is not a replacement for
+a full typesetting engine; it exists so the core reading experience does not depend on a browser
+engine or a network connection. Fractions, roots, Greek letters, sums, integrals, accents and
+common operators are enough for engineering notes.
+
+\begin{align}
+  \frac{\partial u}{\partial t} &= \alpha \nabla^2 u, \\
+  \sqrt{x^2+y^2} &\le \left(\frac{a+b}{c}\right)^2.
+\end{align}
+
+\section{Closing}
+Use the note tool to place a pin in the margin, then write a Markdown note with a table, a code
+snippet and a captured region. Save the document, close it, and open it again. The pin should
+still be at the same page position, and the note should still point at the same source object.
+
+\begin{quote}
+An annotation should explain the source, not replace it.
+\end{quote}
+
+\end{document}
