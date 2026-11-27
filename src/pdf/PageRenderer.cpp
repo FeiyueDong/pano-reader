@@ -47,9 +47,14 @@ bool PageRenderer::hasCachedImage(int pageIndex, const QSize &pixelSize) const
     return m_cache.contains(cacheKey(pageIndex, pixelSize));
 }
 
-QImage PageRenderer::cachedImage(int pageIndex, const QSize &pixelSize) const
+QImage PageRenderer::cachedImage(int pageIndex, const QSize &pixelSize)
 {
-    return m_cache.value(cacheKey(pageIndex, pixelSize));
+    const QString key = cacheKey(pageIndex, pixelSize);
+    const auto it = m_cache.constFind(key);
+    if (it == m_cache.constEnd())
+        return QImage();
+    touch(key);
+    return it.value();
 }
 
 quint64 PageRenderer::requestPage(int pageIndex, const QSize &pixelSize)
@@ -92,7 +97,9 @@ void PageRenderer::onPageRendered(int pageIndex, QSize imageSize, const QImage &
         return;
 
     if (m_cache.contains(key)) {
+        m_cacheBytes -= m_cache.value(key).sizeInBytes();
         m_cache[key] = image;
+        m_cacheBytes += image.sizeInBytes();
     } else {
         m_cache.insert(key, image);
         m_lru.append(key);

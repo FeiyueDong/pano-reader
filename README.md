@@ -2,7 +2,7 @@
 
 PANO 是一个以 PDF 原文为不可变底稿、把标注与 Markdown 笔记作为独立开放数据保存的笔记阅读器。本仓库是 Phase 0 的可操作桌面 Demo，覆盖阅读、文字/图形标注、笔记、公式预览和本地保存的早期闭环；它不是正式产品版本。
 
-![PANO Phase 0 界面](docs/development/phase0-ui.png)
+![PANO Phase 0 界面](docs/development/log/phase0-ui.png)
 
 ## 已实现
 
@@ -94,7 +94,11 @@ tools/build-sample-pdf.sh
 仓库带有少量开发探针，便于回归核心路径（不替代人工验收）：
 
 ```bash
-# 无显示环境下验证：新增/撤销/重做、笔记编辑撤销、保存后重开、PDF 哈希不变，并生成界面截图
+# 非视觉坐标检查：4 种旋转 × 3 种缩放 × 页角/页内点，含非零滚动
+QT_QPA_PLATFORM=offscreen ./build/linux/x86_64/debug/pano-coordinate-probe
+
+# 功能闭环：新增/撤销/重做、笔记编辑撤销、精准导航、删除笔记保护、
+# 保存后重开、PDF 哈希不变；运行时会顺带生成截图文件
 QT_QPA_PLATFORM=offscreen ./build/linux/x86_64/debug/pano-flow-probe \
   examples/sample-paper.pdf build/probe/flow.png
 
@@ -107,7 +111,7 @@ QT_QPA_PLATFORM=offscreen ./build/linux/x86_64/debug/pano-preview-probe \
   build/probe/preview.png
 ```
 
-阶段结论、逐项 V01–V14 状态和已知局限见 [docs/development/phase0-results.md](docs/development/phase0-results.md)。
+Phase 0 结论、逐项 V01–V14 状态见 [docs/development/log/phase0-results.md](docs/development/log/phase0-results.md)；Phase 0.1 修复记录与人工验收清单见 [docs/development/log/phase0.1-results.md](docs/development/log/phase0.1-results.md)。
 
 ## 项目结构
 

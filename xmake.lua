@@ -6,6 +6,10 @@ set_languages("c++20")
 add_rules("mode.debug", "mode.release")
 add_rules("qt.widgetapp")
 
+if is_plat("windows") then
+    add_cxflags("/utf-8")
+end
+
 -- Qt SDK prefix. Configure with: xmake f --qt=/path/to/Qt/6.x.y/gcc_64
 local qt_prefix = get_config("qt") or os.getenv("PANO_QT_PREFIX")
 
@@ -27,6 +31,16 @@ target("pano-preview-probe")
     add_files("src/note/MarkdownPreview.cpp")
     add_files("src/note/MarkdownPreview.h")
     add_frameworks("QtWidgets")
+    add_includedirs("src")
+    if qt_prefix then
+        add_rpathdirs(path.join(qt_prefix, "lib"))
+    end
+
+target("pano-coordinate-probe")
+    set_kind("binary")
+    add_files("tools/coordinate_probe.cpp")
+    add_files("src/reader/PageLayout.cpp")
+    add_frameworks("QtGui")
     add_includedirs("src")
     if qt_prefix then
         add_rpathdirs(path.join(qt_prefix, "lib"))

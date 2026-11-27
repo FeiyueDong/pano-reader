@@ -74,8 +74,8 @@ PdfView::PdfView(QWidget *parent)
 
     m_defaultStyle.strokeColor = QColor(QStringLiteral("#f2b705"));
     m_defaultStyle.strokeWidthPt = 2.0;
-    m_defaultStyle.opacity = 0.55;
-    m_defaultStyle.blend = BlendMode::Multiply;
+    m_defaultStyle.opacity = 1.0;
+    m_defaultStyle.blend = BlendMode::Normal;
 
     m_layout.setViewportSize(viewport()->size());
     updateScrollBars();
@@ -193,7 +193,10 @@ void PdfView::setTool(Tool tool)
     m_tool = tool;
     m_dragMode = DragMode::None;
     m_draft = Annotation();
+    m_editId.clear();
+    m_dragPage = -1;
     m_textSelecting = false;
+    applyToolPreset(tool);
     if (tool != Tool::TextSelect) {
         m_textSelection.reset();
         m_textSelectionPage = -1;
@@ -244,6 +247,52 @@ QString PdfView::toolDisplayName(Tool tool)
 
 void PdfView::setDefaultStyle(const AnnotationStyle &style)
 {
+    m_defaultStyle = style;
+    m_styleUserModified = true;
+}
+
+void PdfView::applyToolPreset(Tool tool)
+{
+    if (m_styleUserModified)
+        return;
+
+    AnnotationStyle style = m_defaultStyle;
+    style.strokeColor = QColor(QStringLiteral("#f2b705"));
+    switch (tool) {
+    case Tool::Highlight:
+        style.strokeWidthPt = 1.0;
+        style.opacity = 0.45;
+        style.blend = BlendMode::Multiply;
+        style.fillColor = QColor();
+        break;
+    case Tool::Highlighter:
+        style.strokeWidthPt = 12.0;
+        style.opacity = 0.4;
+        style.blend = BlendMode::Multiply;
+        style.fillColor = QColor();
+        break;
+    case Tool::Underline:
+    case Tool::StrikeOut:
+        style.strokeWidthPt = 1.5;
+        style.opacity = 1.0;
+        style.blend = BlendMode::Normal;
+        style.fillColor = QColor();
+        break;
+    case Tool::Line:
+    case Tool::Rectangle:
+    case Tool::Ellipse:
+    case Tool::Pencil:
+        style.strokeWidthPt = 2.0;
+        style.opacity = 1.0;
+        style.blend = BlendMode::Normal;
+        style.fillColor = QColor();
+        break;
+    case Tool::Select:
+    case Tool::TextSelect:
+    case Tool::Eraser:
+    case Tool::Note:
+        return;
+    }
     m_defaultStyle = style;
 }
 
@@ -349,13 +398,88 @@ void PdfView::goToPage(int pageIndex)
     viewport()->update();
 }
 
+void PdfView::goToPosition(int pageIndex, const QPointF &pagePoint)
+{
+    if (!hasDocument() || pageIndex < 0 || pageIndex >= m_pageSizes.size())
+        return;
+
+    const QPointF point = clampToPage(pagePoint, pageIndex);
+    const QPointF contentPoint = m_layout.pageToContent(pageIndex).map(point);
+    const QPointF viewPoint = contentToView(contentPoint);
+    const QRectF viewportRect(0.0, 0.0, viewport()->width(), viewport()->height());
+    const qreal margin = 40.0;
+
+    const bool alreadyVisible = viewportRect.adjusted(margin, margin, -margin, -margin)
+                                    .contains(viewPoint);
+    if (!alreadyVisible) {
+        horizontalScrollBar()->setValue(
+            qRound(contentPoint.x() - viewport()->width() / 2.0));
+        verticalScrollBar()->setValue(
+            qRound(contentPoint.y() - viewport()->height() / 2.0));
+    }
+
+    if (pageIndex != m_currentPage) {
+        m_currentPage = pageIndex;
+        emit pageChanged(m_currentPage);
+    }
+    viewport()->update();
+}
+
+void PdfView::revealPageRegion(int pageIndex, const QRectF &pageBounds)
+{
+    if (!hasDocument() || pageIndex < 0 || pageIndex >= m_pageSizes.size())
+        return;
+
+    const QTransform pageToView = pageToViewTransform(pageIndex);
+    const QRectF bounds = pageBounds.normalized();
+    if (bounds.isEmpty()) {
+        goToPosition(pageIndex, bounds.topLeft());
+        return;
+    }
+
+    const QRectF regionInView = pageToView.mapRect(bounds);
+    const QRectF viewportRect(0.0, 0.0, viewport()->width(), viewport()->height());
+    const qreal margin = 40.0;
+    const bool alreadyVisible = viewportRect.adjusted(margin, margin, -margin, -margin)
+                                    .contains(regionInView);
+    if (alreadyVisible) {
+        if (pageIndex != m_currentPage) {
+            m_currentPage = pageIndex;
+            emit pageChanged(m_currentPage);
+        }
+        viewport()->update();
+        return;
+    }
+
+    QPointF targetContent;
+    if (regionInView.width() > viewportRect.width() - 2.0 * margin
+        || regionInView.height() > viewportRect.height() - 2.0 * margin) {
+        // Large target: show its starting edge and keep some surrounding context.
+        targetContent = m_layout.pageToContent(pageIndex).map(bounds.topLeft());
+        horizontalScrollBar()->setValue(qRound(targetContent.x() - margin));
+        verticalScrollBar()->setValue(qRound(targetContent.y() - margin));
+    } else {
+        targetContent = m_layout.pageToContent(pageIndex).map(bounds.center());
+        horizontalScrollBar()->setValue(
+            qRound(targetContent.x() - viewport()->width() / 2.0));
+        verticalScrollBar()->setValue(
+            qRound(targetContent.y() - viewport()->height() / 2.0));
+    }
+
+    if (pageIndex != m_currentPage) {
+        m_currentPage = pageIndex;
+        emit pageChanged(m_currentPage);
+    }
+    viewport()->update();
+}
+
 void PdfView::revealAnnotation(const QString &annotationId)
 {
     const Annotation *annotation = m_annotations.find(annotationId);
     if (!annotation)
         return;
     selectAnnotation(annotationId);
-    goToPage(annotation->pageIndex);
+    revealPageRegion(annotation->pageIndex, annotationPageRegion(*annotation));
 }
 
 void PdfView::selectAnnotation(const QString &annotationId)
@@ -367,18 +491,34 @@ void PdfView::selectAnnotation(const QString &annotationId)
     viewport()->update();
 }
 
+void PdfView::deleteAnnotation(const QString &annotationId, bool confirmed)
+{
+    const Annotation *annotation = m_annotations.find(annotationId);
+    if (!annotation)
+        return;
+
+    if (!confirmed && !annotation->note.isEmpty()) {
+        emit noteDeleteRequested(annotationId);
+        return;
+    }
+
+    const Annotation copy = *annotation;
+    m_undoStack.push(new RemoveAnnotationsCommand(&m_annotations, {copy}));
+    if (m_selectedId == annotationId) {
+        m_selectedId.clear();
+        emit annotationSelectionChanged(QString());
+    }
+    emit statusMessage(copy.note.isEmpty()
+                           ? tr("已删除%1").arg(annotationTypeDisplayName(copy.type))
+                           : tr("已删除%1及其附属笔记，可用 Ctrl+Z 撤销")
+                                 .arg(annotationTypeDisplayName(copy.type)));
+}
+
 void PdfView::deleteSelected()
 {
     if (m_selectedId.isEmpty())
         return;
-    const Annotation *annotation = m_annotations.find(m_selectedId);
-    if (!annotation)
-        return;
-    const Annotation copy = *annotation;
-    m_undoStack.push(new RemoveAnnotationsCommand(&m_annotations, {copy}));
-    m_selectedId.clear();
-    emit annotationSelectionChanged(QString());
-    emit statusMessage(tr("已删除批注"));
+    deleteAnnotation(m_selectedId);
 }
 
 void PdfView::applyStyleToSelected(const AnnotationStyle &style)
@@ -480,8 +620,7 @@ void PdfView::paintEvent(QPaintEvent *event)
         if (!contentRect.intersects(viewportRect))
             continue;
         const QRectF pageRectInView = contentRect.translated(-scrollX, -scrollY);
-        const QTransform pageToView = QTransform::fromTranslate(-scrollX, -scrollY)
-                                      * m_layout.pageToContent(page);
+        const QTransform pageToView = pageToViewTransform(page);
         paintPage(painter, page, pageRectInView, pageToView);
     }
 
@@ -496,60 +635,57 @@ void PdfView::paintEvent(QPaintEvent *event)
             && (m_dragMode == DragMode::DragAnnotation || m_dragMode == DragMode::ResizeAnnotation)) {
             continue;
         }
-        const QTransform pageToView = QTransform::fromTranslate(-scrollX, -scrollY)
-                                      * m_layout.pageToContent(annotation.pageIndex);
-        const QRectF pageRectInView = m_layout.pageRect(annotation.pageIndex)
-                                          .translated(-scrollX, -scrollY);
-        AnnotationRenderer::paint(painter, annotation, pageToView, pageRectInView,
+        const QTransform pageToView = pageToViewTransform(annotation.pageIndex);
+        const QRectF pageViewRect = pageRectInView(annotation.pageIndex);
+        AnnotationRenderer::paint(painter, annotation, pageToView, pageViewRect,
                                   devicePixelRatioF());
     }
 
-    if (m_draft.id.isEmpty() && !m_draft.polygons.isEmpty() && m_dragPage >= 0) {
-        const QTransform pageToView = QTransform::fromTranslate(-scrollX, -scrollY)
-                                      * m_layout.pageToContent(m_dragPage);
-        const QRectF pageRectInView = m_layout.pageRect(m_dragPage).translated(-scrollX, -scrollY);
-        AnnotationRenderer::paint(painter, m_draft, pageToView, pageRectInView,
-                                  devicePixelRatioF());
-    } else if (m_dragMode == DragMode::DragAnnotation || m_dragMode == DragMode::ResizeAnnotation) {
-        if (m_dragPage >= 0 && m_draft.pageIndex >= 0) {
-            const QTransform pageToView = QTransform::fromTranslate(-scrollX, -scrollY)
-                                          * m_layout.pageToContent(m_draft.pageIndex);
-            const QRectF pageRectInView = m_layout.pageRect(m_draft.pageIndex)
-                                              .translated(-scrollX, -scrollY);
-            AnnotationRenderer::paint(painter, m_draft, pageToView, pageRectInView,
-                                      devicePixelRatioF());
-        }
+    const bool previewingNewStroke = (m_dragMode == DragMode::DrawShape
+                                      || m_dragMode == DragMode::DrawPath)
+                                     && m_draft.pageIndex >= 0;
+    const bool previewingEditedObject = (m_dragMode == DragMode::DragAnnotation
+                                         || m_dragMode == DragMode::ResizeAnnotation)
+                                        && m_draft.pageIndex >= 0;
+    if (previewingNewStroke || previewingEditedObject) {
+        AnnotationRenderer::paint(painter, m_draft,
+                                  pageToViewTransform(m_draft.pageIndex),
+                                  pageRectInView(m_draft.pageIndex), devicePixelRatioF());
     }
 
     paintSelectedAnnotationOutline(painter);
 }
 
-void PdfView::paintPage(QPainter &painter, int pageIndex, const QRectF &pageRectInView,
+void PdfView::paintPage(QPainter &painter, int pageIndex, const QRectF &pageViewRect,
                         const QTransform &pageToView)
 {
-    Q_UNUSED(pageToView);
     painter.save();
-    painter.setClipRect(pageRectInView.adjusted(-2.0, -2.0, 2.0, 2.0));
+    painter.setClipRect(pageViewRect.adjusted(-2.0, -2.0, 2.0, 2.0));
 
-    painter.fillRect(pageRectInView.translated(0.0, 3.0), QColor(0, 0, 0, 28));
-    painter.fillRect(pageRectInView, Qt::white);
+    painter.fillRect(pageViewRect.translated(0.0, 3.0), QColor(0, 0, 0, 28));
+    painter.fillRect(pageViewRect, Qt::white);
 
     const QSize pixelSize = pagePixelSize(pageIndex);
     const QImage image = m_renderer.cachedImage(pageIndex, pixelSize);
     if (!image.isNull()) {
-        painter.drawImage(pageRectInView, image);
+        painter.save();
+        painter.setClipRect(pageViewRect, Qt::IntersectClip);
+        painter.setWorldTransform(pageToView);
+        const QRectF sourcePageRect(QPointF(0.0, 0.0), m_layout.pageSizePt(pageIndex));
+        painter.drawImage(sourcePageRect, image);
+        painter.restore();
     } else {
         ensurePageImage(pageIndex);
         painter.setPen(QColor(QStringLiteral("#9aa1ab")));
         QFont font = painter.font();
         font.setPointSizeF(qMax(9.0, font.pointSizeF()));
         painter.setFont(font);
-        painter.drawText(pageRectInView, Qt::AlignCenter, tr("正在渲染页面…"));
+        painter.drawText(pageViewRect, Qt::AlignCenter, tr("正在渲染页面…"));
     }
 
     painter.setPen(QPen(QColor(QStringLiteral("#d3d7de")), 1.0));
     painter.setBrush(Qt::NoBrush);
-    painter.drawRect(pageRectInView.adjusted(0.5, 0.5, -0.5, -0.5));
+    painter.drawRect(pageViewRect.adjusted(0.5, 0.5, -0.5, -0.5));
     painter.restore();
 }
 
@@ -564,12 +700,8 @@ void PdfView::paintSelectionOverlay(QPainter &painter)
     if (!isPageVisible(m_textSelectionPage))
         return;
 
-    const int scrollX = horizontalScrollBar()->value();
-    const int scrollY = verticalScrollBar()->value();
-    const QTransform pageToView = QTransform::fromTranslate(-scrollX, -scrollY)
-                                  * m_layout.pageToContent(m_textSelectionPage);
-    const QRectF pageRectInView = m_layout.pageRect(m_textSelectionPage)
-                                      .translated(-scrollX, -scrollY);
+    const QTransform pageToView = pageToViewTransform(m_textSelectionPage);
+    const QRectF pageViewRect = pageRectInView(m_textSelectionPage);
 
     QColor color;
     if (m_tool == Tool::TextSelect)
@@ -581,7 +713,7 @@ void PdfView::paintSelectionOverlay(QPainter &painter)
     color.setAlpha(m_tool == Tool::TextSelect ? 70 : 85);
 
     painter.save();
-    painter.setClipRect(pageRectInView);
+    painter.setClipRect(pageViewRect);
     painter.setTransform(pageToView);
     painter.setPen(Qt::NoPen);
     painter.setBrush(color);
@@ -608,16 +740,15 @@ void PdfView::paintSelectedAnnotationOutline(QPainter &painter)
     if (!selection || selection->pageIndex < 0 || selection->pageIndex >= m_pageSizes.size())
         return;
 
-    const int scrollX = horizontalScrollBar()->value();
-    const int scrollY = verticalScrollBar()->value();
-    const QTransform pageToView = QTransform::fromTranslate(-scrollX, -scrollY)
-                                  * m_layout.pageToContent(selection->pageIndex);
+    const QTransform pageToView = pageToViewTransform(selection->pageIndex);
 
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
 
     if (selection->type == AnnotationType::NotePoint) {
-        const QPointF center = pageToView.map(selection->p1);
+        // rect.topLeft() is the canonical pin position used by painting and hit
+        // testing; p1 is kept in JSON for backward compatibility only.
+        const QPointF center = pageToView.map(selection->rect.topLeft());
         painter.setPen(QPen(QColor(QStringLiteral("#2f6fed")), 1.5, Qt::DashLine));
         painter.setBrush(Qt::NoBrush);
         painter.drawEllipse(center, 9.0, 9.0);
@@ -670,21 +801,30 @@ QSize PdfView::pagePixelSize(int pageIndex) const
 {
     if (pageIndex < 0 || pageIndex >= m_pageSizes.size())
         return QSize();
-    const QSizeF viewSize = m_layout.pageSizeView(pageIndex);
-    qreal width = viewSize.width() * devicePixelRatioF();
-    qreal height = viewSize.height() * devicePixelRatioF();
+
+    // The raster image is always the original, unrotated page. User view
+    // rotation is applied by pageToViewTransform() at paint time, so the
+    // pixel aspect ratio must follow the unrotated page too.
+    const QSizeF pageSize = m_layout.pageSizePt(pageIndex);
+    const qreal scale = m_layout.zoom() * devicePixelRatioF();
+    qreal width = pageSize.width() * scale;
+    qreal height = pageSize.height() * scale;
     if (width <= 0.0 || height <= 0.0)
         return QSize();
 
     constexpr qreal maxPixels = 16.0 * 1000.0 * 1000.0;
+    constexpr qreal maxDimension = 8192.0;
     const qreal pixels = width * height;
     if (pixels > maxPixels) {
         const qreal factor = std::sqrt(maxPixels / pixels);
         width *= factor;
         height *= factor;
     }
-    width = qBound(1.0, width, 8192.0);
-    height = qBound(1.0, height, 8192.0);
+    if (width > maxDimension || height > maxDimension) {
+        const qreal factor = qMin(maxDimension / width, maxDimension / height);
+        width *= factor;
+        height *= factor;
+    }
     return QSize(qMax(1, qRound(width)), qMax(1, qRound(height)));
 }
 
@@ -776,6 +916,43 @@ void PdfView::centerPage(int pageIndex)
     updateCurrentPage();
 }
 
+QTransform PdfView::pageToViewTransform(int pageIndex) const
+{
+    if (pageIndex < 0 || pageIndex >= m_pageSizes.size())
+        return QTransform();
+    // For QTransform, (A * B).map(p) applies A first, then B. Apply the page
+    // transform first, then subtract the scroll offset in view coordinates.
+    return m_layout.pageToContent(pageIndex)
+           * QTransform::fromTranslate(-horizontalScrollBar()->value(),
+                                       -verticalScrollBar()->value());
+}
+
+QRectF PdfView::pageRectInView(int pageIndex) const
+{
+    if (pageIndex < 0 || pageIndex >= m_pageSizes.size())
+        return QRectF();
+    return m_layout.pageRect(pageIndex)
+        .translated(-horizontalScrollBar()->value(), -verticalScrollBar()->value());
+}
+
+QRectF PdfView::annotationPageRegion(const Annotation &annotation) const
+{
+    if (!annotation.polygons.isEmpty()) {
+        QRectF region;
+        for (const QPolygonF &polygon : annotation.polygons)
+            region = region.isNull() ? polygon.boundingRect()
+                                     : region.united(polygon.boundingRect());
+        if (!region.isEmpty())
+            return region;
+    }
+    if (annotation.type == AnnotationType::NotePoint)
+        return QRectF(annotation.rect.topLeft(), QSizeF(0.0, 0.0));
+    const QRectF bounds = annotation.bounds().normalized();
+    if (!bounds.isEmpty())
+        return bounds;
+    return QRectF(annotation.p1, QSizeF(0.0, 0.0));
+}
+
 QPointF PdfView::viewToContent(const QPointF &viewPos) const
 {
     return QPointF(viewPos.x() + horizontalScrollBar()->value(),
@@ -799,7 +976,11 @@ QPointF PdfView::viewToPage(const QPointF &viewPos, int pageIndex) const
 {
     if (pageIndex < 0 || pageIndex >= m_pageSizes.size())
         return QPointF();
-    return m_layout.pageToContent(pageIndex).inverted().map(viewToContent(viewPos));
+    bool invertible = false;
+    const QTransform inverse = pageToViewTransform(pageIndex).inverted(&invertible);
+    if (!invertible)
+        return QPointF();
+    return inverse.map(viewPos);
 }
 
 QPointF PdfView::clampToPage(const QPointF &pagePoint, int pageIndex) const
@@ -855,6 +1036,9 @@ void PdfView::keyPressEvent(QKeyEvent *event)
     if (event->key() == Qt::Key_Escape) {
         m_dragMode = DragMode::None;
         m_draft = Annotation();
+        m_editId.clear();
+        m_resizeHandle = -1;
+        m_dragPage = -1;
         m_textSelecting = false;
         m_textSelection.reset();
         m_textSelectionPage = -1;
@@ -919,9 +1103,7 @@ void PdfView::mousePressEvent(QMouseEvent *event)
             const Annotation *selected = m_annotations.find(m_selectedId);
             if (selected && selected->isResizable()) {
                 const QVector<QPointF> handles = handlePointsInPage(selected->bounds());
-                const QTransform pageToView = QTransform::fromTranslate(-horizontalScrollBar()->value(),
-                                                                        -verticalScrollBar()->value())
-                                              * m_layout.pageToContent(selected->pageIndex);
+                const QTransform pageToView = pageToViewTransform(selected->pageIndex);
                 for (int i = 0; i < handles.size(); ++i) {
                     if (QLineF(pageToView.map(handles.at(i)), viewPos).length() <= 7.0) {
                         startResize(m_selectedId, i, viewPos);
@@ -992,9 +1174,7 @@ void PdfView::mouseMoveEvent(QMouseEvent *event)
             const Annotation *selected = m_annotations.find(m_selectedId);
             if (selected && selected->isResizable()) {
                 const QVector<QPointF> handles = handlePointsInPage(selected->bounds());
-                const QTransform pageToView = QTransform::fromTranslate(-horizontalScrollBar()->value(),
-                                                                        -verticalScrollBar()->value())
-                                              * m_layout.pageToContent(selected->pageIndex);
+                const QTransform pageToView = pageToViewTransform(selected->pageIndex);
                 for (int i = 0; i < handles.size(); ++i) {
                     const QPointF handle = pageToView.map(handles.at(i));
                     if (QLineF(handle, viewPos).length() <= 7.0) {
@@ -1025,14 +1205,17 @@ void PdfView::mouseReleaseEvent(QMouseEvent *event)
 
     switch (m_dragMode) {
     case DragMode::TextSelection:
+        updateTextSelection(event->position());
         finishTextSelection();
         break;
     case DragMode::DrawShape:
     case DragMode::DrawPath:
+        updateDraw(m_dragPage, viewToPage(event->position(), m_dragPage));
         finishDraw();
         break;
     case DragMode::DragAnnotation:
     case DragMode::ResizeAnnotation:
+        updateAnnotationDrag(event->position());
         finishAnnotationDrag();
         break;
     case DragMode::None:
@@ -1089,18 +1272,16 @@ bool PdfView::noteHitAtViewPos(const Annotation &annotation, const QPointF &view
 {
     if (annotation.pageIndex < 0 || annotation.pageIndex >= m_pageSizes.size())
         return false;
-    const QTransform pageToView = QTransform::fromTranslate(-horizontalScrollBar()->value(),
-                                                            -verticalScrollBar()->value())
-                                  * m_layout.pageToContent(annotation.pageIndex);
-    return QLineF(pageToView.map(annotation.p1), viewPos).length() <= 9.0;
+    const QTransform pageToView = pageToViewTransform(annotation.pageIndex);
+    // rect.topLeft() is the canonical pin position; p1 is only kept for old
+    // JSON payloads and may be absent on data written before the Phase 0.1 fix.
+    return QLineF(pageToView.map(annotation.rect.topLeft()), viewPos).length() <= 9.0;
 }
 
 QPolygonF PdfView::annotationViewPolygon(const Annotation &annotation, int pageIndex) const
 {
     const QRectF bounds = annotation.bounds();
-    const QTransform pageToView = QTransform::fromTranslate(-horizontalScrollBar()->value(),
-                                                            -verticalScrollBar()->value())
-                                  * m_layout.pageToContent(pageIndex);
+    const QTransform pageToView = pageToViewTransform(pageIndex);
     QPolygonF polygon;
     polygon << pageToView.map(bounds.topLeft()) << pageToView.map(bounds.topRight())
             << pageToView.map(bounds.bottomRight()) << pageToView.map(bounds.bottomLeft());
@@ -1284,14 +1465,7 @@ void PdfView::beginDraw(int pageIndex, const QPointF &pagePoint)
     m_draft = makeBaseAnnotation(type, pageIndex);
     m_draft.path.clear();
     m_draft.polygons.clear();
-    if (type == AnnotationType::Highlighter) {
-        m_draft.style.strokeWidthPt = qMax(12.0, m_defaultStyle.strokeWidthPt * 3.0);
-        m_draft.style.blend = BlendMode::Multiply;
-        m_draft.style.opacity = qMin(0.5, m_defaultStyle.opacity);
-        m_draft.style.strokeColor = m_defaultStyle.strokeColor;
-    } else {
-        m_draft.style = m_defaultStyle;
-    }
+    m_draft.style = m_defaultStyle;
     m_dragMode = (type == AnnotationType::Pencil || type == AnnotationType::Highlighter)
                      ? DragMode::DrawPath
                      : DragMode::DrawShape;
@@ -1473,15 +1647,6 @@ void PdfView::createTextAnnotation(const QPdfSelection &selection, int pageIndex
     annotation.textEnd = selection.endIndex();
     annotation.text = selection.text();
     annotation.style = m_defaultStyle;
-    if (type == AnnotationType::Highlight) {
-        annotation.style.blend = BlendMode::Multiply;
-        annotation.style.opacity = qMin(0.5, m_defaultStyle.opacity);
-        annotation.style.strokeWidthPt = 1.0;
-    } else {
-        annotation.style.blend = BlendMode::Normal;
-        annotation.style.opacity = 1.0;
-        annotation.style.strokeWidthPt = qMax(1.0, m_defaultStyle.strokeWidthPt);
-    }
     addAnnotation(annotation, true);
 }
 
@@ -1506,14 +1671,9 @@ void PdfView::eraseAt(const QPointF &viewPos)
         emit statusMessage(tr("此处没有可删除的批注"));
         return;
     }
-    const Annotation *annotation = m_annotations.find(hit);
-    if (!annotation)
-        return;
-    const Annotation copy = *annotation;
-    m_undoStack.push(new RemoveAnnotationsCommand(&m_annotations, {copy}));
-    if (m_selectedId == hit)
-        selectAnnotation(QString());
-    emit statusMessage(tr("已删除%1").arg(annotationTypeDisplayName(copy.type)));
+    // Object eraser: delete the whole annotation. Annotations carrying notes
+    // are protected by noteDeleteRequested() and require explicit confirmation.
+    deleteAnnotation(hit);
 }
 
 void PdfView::dragEnterEvent(QDragEnterEvent *event)

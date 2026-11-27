@@ -51,6 +51,7 @@ private slots:
     void onAnnotationsChanged();
     void onSelectionChanged(const QString &annotationId);
     void onNoteRequested(const QString &annotationId);
+    void confirmNoteDeletion(const QString &annotationId);
     void onPageChanged(int pageIndex);
     void onZoomChanged(qreal zoom);
     void onRotationChanged(int degrees);

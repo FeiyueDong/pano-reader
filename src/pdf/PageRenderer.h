@@ -23,7 +23,8 @@ public:
     void setDocument(PdfDocument *document);
     void clearCache();
 
-    QImage cachedImage(int pageIndex, const QSize &pixelSize) const;
+    // A cache hit updates LRU order, because this is the normal paint path.
+    QImage cachedImage(int pageIndex, const QSize &pixelSize);
     bool hasCachedImage(int pageIndex, const QSize &pixelSize) const;
 
     // Returns the request id, or 0 if the request could not be issued.

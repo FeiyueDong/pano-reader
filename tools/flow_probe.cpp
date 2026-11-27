@@ -154,6 +154,30 @@ int main(int argc, char **argv)
     view->undoStack()->redo();
     qInfo() << "note after redo chars:" << view->annotations()->find(pin.id)->note.markdown.size();
 
+    view->goToPosition(1, QPointF(300.0, 400.0));
+    const bool navigationReachedPage = view->currentPage() == 1;
+    view->revealAnnotation(pin.id);
+    qInfo() << "precise navigation reached page 1:" << navigationReachedPage
+            << "back to pin page:" << view->currentPage();
+    if (!navigationReachedPage || view->currentPage() != 0) {
+        qWarning() << "precise navigation verification failed";
+        return 12;
+    }
+
+    const QString noteBeforeDelete = view->annotations()->find(pin.id)->note.markdown;
+    view->selectAnnotation(pin.id);
+    view->deleteAnnotation(pin.id, true);
+    const bool deletedWithNote = view->annotations()->count() == 1;
+    view->undoStack()->undo();
+    const Annotation *restored = view->annotations()->find(pin.id);
+    const bool undoRestoredNote = restored && restored->note.markdown == noteBeforeDelete;
+    qInfo() << "delete annotation+note:" << deletedWithNote
+            << "undo restores note:" << undoRestoredNote;
+    if (!deletedWithNote || !undoRestoredNote || view->annotations()->count() != 2) {
+        qWarning() << "annotation/note delete-undo verification failed";
+        return 13;
+    }
+
     const QRectF pinBeforeRotation = view->annotations()->find(pin.id)->rect;
     view->setRotation(90);
     view->setRotation(0);

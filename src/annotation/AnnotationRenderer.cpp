@@ -52,11 +52,25 @@ void paintHighlighter(QPainter &painter, const Annotation &annotation,
     if (path.elementCount() == 0)
         return;
 
-    // Render the whole stroke once into an opaque mask, then composite the mask
-    // with the requested opacity. This avoids alpha build-up where the pointer
-    // samples overlap within a single highlighter stroke.
-    const QSize maskSize(qMax(1, qRound(pageRectInView.width() * devicePixelRatio)),
-                         qMax(1, qRound(pageRectInView.height() * devicePixelRatio)));
+    const qreal penWidth = qMax(1.0, annotation.style.strokeWidthPt);
+    const qreal padding = penWidth / 2.0 + 2.0;
+    QRectF strokeBounds = path.boundingRect().adjusted(-padding, -padding, padding, padding);
+    if (annotation.path.size() == 1) {
+        strokeBounds = QRectF(annotation.path.first(), QSizeF(0.0, 0.0))
+                           .adjusted(-padding, -padding, padding, padding);
+    }
+
+    // Only rasterize the stroke's actual influence area. The mask is still
+    // composited once for the whole stroke, so self-overlap does not build up.
+    QRectF maskRect = pageToView.mapRect(strokeBounds).intersected(pageRectInView);
+    if (maskRect.isEmpty())
+        return;
+    maskRect = maskRect.adjusted(-1.0, -1.0, 1.0, 1.0).intersected(pageRectInView);
+    if (maskRect.isEmpty())
+        return;
+
+    const QSize maskSize(qMax(1, qCeil(maskRect.width() * devicePixelRatio)),
+                         qMax(1, qCeil(maskRect.height() * devicePixelRatio)));
     QImage mask(maskSize, QImage::Format_ARGB32_Premultiplied);
     mask.setDevicePixelRatio(devicePixelRatio);
     mask.fill(Qt::transparent);
@@ -64,10 +78,9 @@ void paintHighlighter(QPainter &painter, const Annotation &annotation,
     {
         QPainter maskPainter(&mask);
         maskPainter.setRenderHint(QPainter::Antialiasing, true);
-        maskPainter.setWorldTransform(QTransform::fromTranslate(-pageRectInView.x(),
-                                                               -pageRectInView.y())
-                                      * pageToView);
-        QPen pen(annotation.style.strokeColor, qMax(1.0, annotation.style.strokeWidthPt));
+        maskPainter.setWorldTransform(pageToView
+                                      * QTransform::fromTranslate(-maskRect.x(), -maskRect.y()));
+        QPen pen(annotation.style.strokeColor, penWidth);
         pen.setCapStyle(Qt::RoundCap);
         pen.setJoinStyle(Qt::RoundJoin);
         maskPainter.setPen(pen);
@@ -86,7 +99,7 @@ void paintHighlighter(QPainter &painter, const Annotation &annotation,
     painter.setClipRect(pageRectInView);
     painter.setOpacity(qBound<qreal>(0.0, annotation.style.opacity, 1.0));
     painter.setCompositionMode(compositionMode(annotation.style.blend));
-    painter.drawImage(pageRectInView.topLeft(), mask);
+    painter.drawImage(maskRect, mask);
     painter.restore();
 }
 

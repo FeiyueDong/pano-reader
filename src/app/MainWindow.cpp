@@ -536,6 +536,7 @@ void MainWindow::connectSignals()
     connect(m_view, &PdfView::annotationsChanged, this, &MainWindow::onAnnotationsChanged);
     connect(m_view, &PdfView::annotationSelectionChanged, this, &MainWindow::onSelectionChanged);
     connect(m_view, &PdfView::noteRequested, this, &MainWindow::onNoteRequested);
+    connect(m_view, &PdfView::noteDeleteRequested, this, &MainWindow::confirmNoteDeletion);
     connect(m_view, &PdfView::pageChanged, this, &MainWindow::onPageChanged);
     connect(m_view, &PdfView::zoomChanged, this, &MainWindow::onZoomChanged);
     connect(m_view, &PdfView::rotationChanged, this, &MainWindow::onRotationChanged);
@@ -845,6 +846,25 @@ void MainWindow::onNoteRequested(const QString &annotationId)
     beginNoteEdit();
 }
 
+void MainWindow::confirmNoteDeletion(const QString &annotationId)
+{
+    const Annotation *annotation = m_view->annotations()->find(annotationId);
+    if (!annotation || annotation->note.isEmpty())
+        return;
+
+    const QString title = annotation->note.title.trimmed().isEmpty()
+                              ? tr("（无标题笔记）")
+                              : annotation->note.title.trimmed();
+    const QString excerpt = annotation->note.markdown.trimmed().left(160);
+    const QMessageBox::StandardButton answer = QMessageBox::question(
+        this, tr("删除带笔记的标注"),
+        tr("标注“%1”包含笔记，删除后会同时移除笔记内容。\n\n%2\n\n%3\n\n是否继续？")
+            .arg(annotationTypeDisplayName(annotation->type), title, excerpt),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer == QMessageBox::Yes)
+        m_view->deleteAnnotation(annotationId, true);
+}
+
 void MainWindow::onNoteListItemActivated(QListWidgetItem *item)
 {
     if (!item)
@@ -852,7 +872,8 @@ void MainWindow::onNoteListItemActivated(QListWidgetItem *item)
     const QString annotationId = item->data(Qt::UserRole).toString();
     if (annotationId.isEmpty())
         return;
-    m_view->selectAnnotation(annotationId);
+    // revealAnnotation() selects and scrolls to the actual page geometry; do not
+    // call selectAnnotation() here, otherwise the list refresh can race the jump.
     m_view->revealAnnotation(annotationId);
 }
 
@@ -1223,6 +1244,7 @@ void MainWindow::onToolChanged(PdfView::Tool tool)
             break;
         }
     }
+    updatePropertyPanel();
     statusBar()->showMessage(tr("当前工具：%1").arg(PdfView::toolDisplayName(tool)), 3000);
 }
 

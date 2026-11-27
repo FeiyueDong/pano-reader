@@ -55,6 +55,7 @@ public:
     static QString toolDisplayName(Tool tool);
 
     void setDefaultStyle(const AnnotationStyle &style);
+    void applyToolPreset(Tool tool);
     AnnotationStyle defaultStyle() const { return m_defaultStyle; }
 
     qreal zoom() const;
@@ -70,11 +71,14 @@ public:
 
     int currentPage() const { return m_currentPage; }
     void goToPage(int pageIndex);
+    void goToPosition(int pageIndex, const QPointF &pagePoint);
+    void revealPageRegion(int pageIndex, const QRectF &pageBounds);
     void revealAnnotation(const QString &annotationId);
     int pageCount() const;
 
     QString selectedAnnotationId() const { return m_selectedId; }
     void selectAnnotation(const QString &annotationId);
+    void deleteAnnotation(const QString &annotationId, bool confirmed = false);
     void deleteSelected();
     void applyStyleToSelected(const AnnotationStyle &style);
     void setAnnotationNote(const QString &annotationId, const AnnotationNote &note);
@@ -92,6 +96,7 @@ signals:
     void annotationsChanged();
     void documentChanged();
     void noteRequested(const QString &annotationId);
+    void noteDeleteRequested(const QString &annotationId);
     void openFileRequested(const QString &filePath);
     void statusMessage(const QString &message);
 
@@ -118,11 +123,14 @@ private:
         DrawPath
     };
 
+    QTransform pageToViewTransform(int pageIndex) const;
+    QRectF pageRectInView(int pageIndex) const;
     QPointF viewToContent(const QPointF &viewPos) const;
     QPointF contentToView(const QPointF &contentPos) const;
     int pageAtViewPos(const QPointF &viewPos) const;
     QPointF viewToPage(const QPointF &viewPos, int pageIndex) const;
     QPointF clampToPage(const QPointF &pagePoint, int pageIndex) const;
+    QRectF annotationPageRegion(const Annotation &annotation) const;
     bool isPageVisible(int pageIndex) const;
     void ensurePageImage(int pageIndex);
     QSize pagePixelSize(int pageIndex) const;
@@ -167,6 +175,7 @@ private:
     int m_currentPage = 0;
     Tool m_tool = Tool::Select;
     AnnotationStyle m_defaultStyle;
+    bool m_styleUserModified = false;
     QString m_selectedId;
 
     DragMode m_dragMode = DragMode::None;
