@@ -12,6 +12,7 @@ class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
+class QIntValidator;
 class QLineEdit;
 class QPdfSearchModel;
 class QListWidget;
@@ -44,6 +45,9 @@ public:
     explicit ReaderWorkspace(DocumentSession *session, QWidget *parent = nullptr);
     ~ReaderWorkspace() override;
 
+public:
+    void resizeEvent(QResizeEvent *event) override;
+
     PdfView *view() const { return m_view; }
     NotePanel *notePanel() const { return m_notePanel; }
     DocumentSession *session() const { return m_session; }
@@ -61,8 +65,10 @@ public:
     void setFullscreenMode(bool fullscreen);
     bool closeTransientUi();
     void toggleSearchBar();
+    void openSearchPanel();
     void navigateBack();
     void navigateForward();
+    void clearNavigationHistory();
     void addBookmarkHere();
 
 signals:
@@ -93,6 +99,9 @@ private slots:
     void onZoomChanged(qreal zoom);
     void onRotationChanged(int degrees);
     void goToPageFromSpin(int oneBasedPage);
+    void goToPreviousPage();
+    void goToNextPage();
+    void onLayoutControlsChanged();
     void zoomEdited();
     void saveCurrent();
     void deleteSelected();
@@ -105,6 +114,8 @@ private slots:
     void onLayoutModeChanged(PageLayoutMode mode);
     void onFirstPageAloneChanged(bool firstAlone);
     void onNavigated(int pageIndex, const QPointF &pagePoint, int reason);
+    void onAboutToNavigate(int fromPage, const QPointF &fromPoint, int targetPage,
+                           const QPointF &targetPoint, int reason);
     void runSearch();
     void refreshSearchResults();
     void activateSearchResult(QListWidgetItem *item);
@@ -119,6 +130,8 @@ private slots:
 
 private:
     void buildUi();
+    void positionFullscreenExit();
+    void updateLayoutControls();
     void buildFloatingToolBars();
     void applyTextFloatingAction(int action);
     void applyRegionFloatingAction(int action);
@@ -127,10 +140,13 @@ private:
     QWidget *buildBottomBar();
     QWidget *buildSearchBar();
     QWidget *buildBookmarkTab();
+    QWidget *buildAnnotationTab();
     QWidget *buildLeftDock();
     QWidget *buildRightDock();
     QWidget *buildDetailPane();
     void refreshAnnotationList();
+    void refreshAnnotationPreview();
+    void updateThumbnailLayout();
     QListWidgetItem *makeAnnotationItem(const Annotation &annotation) const;
     const Annotation *currentAnnotation() const;
     AnnotationStyle styleFromControls() const;
@@ -170,12 +186,16 @@ private:
     PageRenderer *m_thumbRenderer = nullptr;
     QTimer *m_thumbRefreshTimer = nullptr;
     QHash<int, quint64> m_thumbRequests;
+    QSet<int> m_thumbGenerated;
     QListWidget *m_annotationList = nullptr;
     QListWidget *m_bookmarkList = nullptr;
     QPushButton *m_bookmarkAddButton = nullptr;
     QPushButton *m_bookmarkDeleteButton = nullptr;
     QComboBox *m_annotationFilter = nullptr;
+    QComboBox *m_annotationSort = nullptr;
     QCheckBox *m_noteOnlyCheck = nullptr;
+    QLabel *m_annotationPreview = nullptr;
+    QLabel *m_annotationNotShown = nullptr;
 
     QLabel *m_detailTitle = nullptr;
     QLabel *m_detailMeta = nullptr;
@@ -186,13 +206,24 @@ private:
     QListWidget *m_toolList = nullptr; // unused placeholder for legacy code
     QToolButton *m_leftToggle = nullptr;
     QToolButton *m_rightToggle = nullptr;
+    QToolButton *m_exitFullscreenButton = nullptr;
+    int m_fullscreenAnchorPage = -1;
+    QPointF m_fullscreenAnchorPoint;
 
-    QSpinBox *m_pageSpin = nullptr;
+    QLineEdit *m_pageSpin = nullptr;
+    QIntValidator *m_pageValidator = nullptr;
+    QLabel *m_pageTotalLabel = nullptr;
+    QToolButton *m_prevPageButton = nullptr;
+    QToolButton *m_nextPageButton = nullptr;
     QComboBox *m_layoutCombo = nullptr;
+    QAction *m_singlePageAction = nullptr;
+    QAction *m_doublePageAction = nullptr;
+    QCheckBox *m_continuousCheck = nullptr;
     QCheckBox *m_firstPageAloneCheck = nullptr;
     QComboBox *m_zoomCombo = nullptr;
     QLabel *m_statusLabel = nullptr;
     QLabel *m_saveStateLabel = nullptr;
+    QLabel *m_statusInfoLabel = nullptr;
 
     QAction *m_saveAction = nullptr;
     QAction *m_undoAction = nullptr;
@@ -239,6 +270,7 @@ private:
     QLineEdit *m_searchEdit = nullptr;
     QLabel *m_searchCount = nullptr;
     QListWidget *m_searchResults = nullptr;
+    QHash<int, QVector<QRectF>> m_searchHighlightRects;
 
     QString m_editingId;
     QString m_styleTargetId;
@@ -257,8 +289,11 @@ private:
     bool m_fullscreenLeftVisible = true;
     bool m_fullscreenRightVisible = true;
     struct NavPoint { int page = 0; QPointF point; };
+    int m_previousLeftTab = 0;
     QVector<NavPoint> m_history;
     int m_historyIndex = -1;
+    NavPoint m_pendingHistoryStart;
+    bool m_pendingHistoryValid = false;
 };
 
 } // namespace pano

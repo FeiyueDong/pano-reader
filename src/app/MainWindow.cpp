@@ -3,6 +3,7 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QKeyEvent>
 #include <QCloseEvent>
@@ -13,6 +14,7 @@
 #include <QDropEvent>
 #include <QMimeData>
 #include <QUrl>
+#include <QShortcut>
 #include <QSignalBlocker>
 #include <QSysInfo>
 #include <QFileDialog>
@@ -242,9 +244,15 @@ void MainWindow::buildActions()
     m_diagnosticsAction = new QAction(tr("诊断信息"), this);
     connect(m_diagnosticsAction, &QAction::triggered, this, &MainWindow::showDiagnostics);
     m_fullscreenAction = new QAction(tr("全屏"), this);
-    m_fullscreenAction->setShortcut(QKeySequence(Qt::Key_F11));
     m_fullscreenAction->setCheckable(true);
+    m_fullscreenAction->setToolTip(tr("全屏 (F11)"));
     connect(m_fullscreenAction, &QAction::triggered, this, &MainWindow::toggleFullscreen);
+
+    // F11 must keep working after the menu bar is hidden in fullscreen. A
+    // window-level QShortcut is independent of QAction/menu visibility.
+    auto *fullscreenShortcut = new QShortcut(QKeySequence(Qt::Key_F11), this);
+    fullscreenShortcut->setContext(Qt::WindowShortcut);
+    connect(fullscreenShortcut, &QShortcut::activated, this, &MainWindow::toggleFullscreen);
 
     m_toolGroup = new QActionGroup(this);
     m_toolGroup->setExclusive(true);
@@ -300,6 +308,11 @@ void MainWindow::buildMenus()
     editMenu->addSeparator();
     editMenu->addAction(m_deleteAction);
     editMenu->addAction(m_editNoteAction);
+    QAction *findAction = editMenu->addAction(tr("查找…"));
+    connect(findAction, &QAction::triggered, this, [this] {
+        if (ReaderWorkspace *workspace = currentWorkspace())
+            workspace->openSearchPanel();
+    });
 
     QMenu *viewMenu = menuBar()->addMenu(tr("视图"));
     viewMenu->addAction(m_zoomInAction);
@@ -502,6 +515,12 @@ void MainWindow::updateLibraryTab()
 
 bool MainWindow::openBook(const QString &bookId)
 {
+    const bool timing = qEnvironmentVariableIsSet("PANO_OPEN_TIMING");
+    QElapsedTimer openTimer;
+    if (timing) {
+        openTimer.start();
+        qInfo().noquote() << QStringLiteral("[PANO_TIMING] openBook begin book=%1").arg(bookId);
+    }
     if (!m_manager->isOpen()) {
         setStatus(tr("请先打开书库。"));
         return false;
@@ -522,8 +541,15 @@ bool MainWindow::openBook(const QString &bookId)
         showError(tr("无法打开书籍"), error);
         return false;
     }
+    if (timing)
+        qInfo().noquote() << QStringLiteral("[PANO_TIMING] session loaded pages=%1 ms=%2")
+                                 .arg(session->view()->pageCount())
+                                 .arg(openTimer.elapsed());
     session->setAutosaveSeconds(m_settings->settings().autosaveSeconds);
     attachSession(session);
+    if (timing)
+        qInfo().noquote() << QStringLiteral("[PANO_TIMING] window attached ms=%1")
+                                 .arg(openTimer.elapsed());
     m_settings->setLastBookId(bookId);
     QString saveError;
     m_settings->save(&saveError);
@@ -574,6 +600,11 @@ void MainWindow::connectSession(DocumentSession *session)
             [this, session](const QString &message) {
                 if (session == currentSession())
                     setStatus(message);
+            });
+    connect(session->workspace(), &ReaderWorkspace::fullscreenRequested, this,
+            [this, session]() {
+                if (session == currentSession())
+                    toggleFullscreen();
             });
 
     PdfView *view = session->view();
@@ -672,6 +703,8 @@ void MainWindow::onTabChanged(int index)
     updateActions();
     updateWindowTitle();
     updateSessionStatus();
+    if (!m_fullscreen)
+        statusBar()->setVisible(index == 0);
 }
 
 void MainWindow::onTabCloseRequested(int index)
@@ -854,6 +887,8 @@ void MainWindow::updateActions()
     m_fitWidthAction->setEnabled(reader);
     m_fitPageAction->setEnabled(reader);
     m_rotateAction->setEnabled(reader);
+    if (m_fullscreenAction)
+        m_fullscreenAction->setEnabled(reader);
     if (m_pageSpin)
         m_pageSpin->setEnabled(reader);
     if (m_zoomCombo)
@@ -969,6 +1004,7 @@ void MainWindow::showPreferences()
         return;
     for (DocumentSession *session : m_sessions) {
         session->setAutosaveSeconds(m_settings->settings().autosaveSeconds);
+        session->view()->setWheelTurnsPage(m_settings->settings().wheelTurnsPage);
         session->workspace()->reloadToolPreset();
     }
     updateActions();
@@ -1036,6 +1072,8 @@ void MainWindow::restoreLastSession()
 
 void MainWindow::toggleFullscreen()
 {
+    if (!currentWorkspace())
+        return;
     if (!m_fullscreen) {
         m_savedWindowState = saveState();
         m_savedGeometry = saveGeometry();
@@ -1043,8 +1081,10 @@ void MainWindow::toggleFullscreen()
         m_savedStatusVisible = statusBar()->isVisible();
         m_savedTabBarVisible = m_tabs->tabBar()->isVisible();
         m_fullscreen = true;
-        if (m_fullscreenAction)
+        if (m_fullscreenAction) {
             m_fullscreenAction->setChecked(true);
+            m_fullscreenAction->setText(tr("退出全屏"));
+        }
         menuBar()->hide();
         statusBar()->hide();
         m_tabs->tabBar()->hide();
@@ -1054,8 +1094,10 @@ void MainWindow::toggleFullscreen()
         qApp->installEventFilter(this);
     } else {
         m_fullscreen = false;
-        if (m_fullscreenAction)
+        if (m_fullscreenAction) {
             m_fullscreenAction->setChecked(false);
+            m_fullscreenAction->setText(tr("全屏"));
+        }
         qApp->removeEventFilter(this);
         showNormal();
         if (!m_savedGeometry.isEmpty())
@@ -1063,7 +1105,7 @@ void MainWindow::toggleFullscreen()
         if (!m_savedWindowState.isEmpty())
             restoreState(m_savedWindowState);
         menuBar()->setVisible(m_savedMenuVisible);
-        statusBar()->setVisible(m_savedStatusVisible);
+        statusBar()->setVisible(m_savedStatusVisible && m_tabs->currentIndex() == 0);
         m_tabs->tabBar()->setVisible(m_savedTabBarVisible);
         if (ReaderWorkspace *workspace = currentWorkspace())
             workspace->setFullscreenMode(false);

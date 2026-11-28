@@ -26,13 +26,13 @@ struct AppSettings {
     int libraryInfoWidth = 340;
     bool readerLeftVisible = true;
     bool readerRightVisible = true;
-    int readerLeftWidth = 360;
+    int readerLeftWidth = 240;
     int readerRightWidth = 340;
     QString defaultLayoutMode = QStringLiteral("continuous_single");
     ZoomMode defaultZoomMode = ZoomMode::FitPage;
     bool firstPageAlone = true;
     int pageGap = 16;
-    bool wheelTurnsPage = false;
+    bool wheelTurnsPage = true;
 };
 
 class SettingsManager : public QObject

@@ -282,7 +282,8 @@
 
 - `general.json`：`format: pano-settings-general`，包含主题键、界面字号、恢复上次书库、
   恢复打开标签、自动保存秒数、默认导入方式、书库封面/列表视图、默认布局、默认缩放
-  模式、首页单独、页间距和滚轮翻页。
+  模式、首页单独、页间距和滚轮翻页。`wheel_turns_page` 新安装默认 `true`，用户显式保存的
+  `false` 必须保持不变；滚轮翻页只影响非连续布局。
 - `workspace.json`：`format: pano-settings-workspace`，包含上次书库路径、上次书籍 ID、
   打开书籍 ID 列表、书库三栏和阅读器左右栏的宽度与可见性。
 - `tools.json`：`format: pano-tool-presets`，按工具保存新标注预设和橡皮半径；不属于书库，不随

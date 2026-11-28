@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QAbstractScrollArea>
+#include <QElapsedTimer>
 #include <QImage>
 #include <optional>
 #include <QPdfSelection>
@@ -45,7 +46,8 @@ public:
 
     enum class NavigationAlignment {
         PageTop,
-        Center
+        Center,
+        PageBottom
     };
 
     enum class NavigationReason {
@@ -108,6 +110,7 @@ public:
     int currentPage() const { return m_currentPage; }
     void goToPage(int pageIndex);
     void goToPosition(int pageIndex, const QPointF &pagePoint);
+    void navigatePageStep(int direction, bool history = false);
     void navigateTo(int pageIndex, const QPointF &pagePoint = QPointF(),
                     NavigationAlignment alignment = NavigationAlignment::PageTop,
                     NavigationReason reason = NavigationReason::Programmatic);
@@ -141,8 +144,11 @@ public:
     bool pasteAnnotation(const QPointF &viewPos = QPointF());
     bool duplicateSelected();
     void setEraserRadius(int radius);
+    void updateEraserCursor();
+    void cancelErase();
     void setSearchHighlights(const QHash<int, QVector<QRectF>> &highlights,
-                             int currentPage = -1, const QRectF &currentRect = QRectF());
+                             int currentPage = -1,
+                             const QVector<QRectF> &currentRects = QVector<QRectF>());
     void clearSearchHighlights();
     QImage selectedRegionImage() const;
     int eraserRadius() const { return m_eraserRadius; }
@@ -156,6 +162,8 @@ signals:
     void layoutModeChanged(pano::PageLayoutMode mode);
     void firstPageAloneChanged(bool firstAlone);
     void navigated(int pageIndex, const QPointF &pagePoint, int reason);
+    void aboutToNavigate(int fromPage, const QPointF &fromPoint, int targetPage,
+                         const QPointF &targetPoint, int reason);
     void bookmarkRequested(int pageIndex, const QPointF &pagePoint);
     void toolChanged(PdfView::Tool tool);
     void annotationSelectionChanged(const QString &annotationId);
@@ -290,7 +298,11 @@ private:
     QVector<QPointF> m_drawRawPath;
     int m_eraserRadius = 12;
     QSet<QString> m_eraseIds;
+    QSet<QString> m_erasePreviewIds;
     QVector<Annotation> m_eraseRemoved;
+    bool m_eraseProtectedHinted = false;
+    int m_wheelAccum = 0;
+    QElapsedTimer m_wheelCooldown;
 
     int m_textHitPage = -1;
     QPointF m_textHitPoint;
@@ -298,7 +310,7 @@ private:
     bool m_textHitResult = false;
     QHash<int, QVector<QRectF>> m_searchHighlights;
     int m_searchCurrentPage = -1;
-    QRectF m_searchCurrentRect;
+    QVector<QRectF> m_searchCurrentRects;
 };
 
 } // namespace pano

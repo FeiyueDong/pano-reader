@@ -3,6 +3,7 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
+#include <algorithm>
 #include <QBuffer>
 #include <QCheckBox>
 #include <QClipboard>
@@ -34,6 +35,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSlider>
@@ -182,14 +184,17 @@ ReaderWorkspace::ReaderWorkspace(DocumentSession *session, QWidget *parent)
             m_eraserRadiusSpin->setValue(presets->eraserRadius());
     }
 
-    connect(m_searchModel, &QPdfSearchModel::countChanged, this,
-            &ReaderWorkspace::refreshSearchResults);
+    connect(m_searchModel, &QPdfSearchModel::countChanged, this, [this]() {
+        if (m_searchCount && m_searchModel && !m_searchModel->searchString().isEmpty())
+            m_searchCount->setText(tr("搜索中… %1").arg(m_searchModel->count()));
+    });
     connect(m_searchModel, &QPdfSearchModel::statusChanged, this, [this](QPdfSearchModel::Status status) {
-        if (status == QPdfSearchModel::Status::Finished && m_searchCount) {
-            const int count = m_searchModel->count();
-            m_searchCount->setText(count > 0 ? tr("%1 处").arg(count) : tr("无结果"));
-            if (count == 0)
-                showStatus(tr("未找到匹配文本"));
+        if (status == QPdfSearchModel::Status::Finished) {
+            refreshSearchResults();
+            if (m_searchCount && m_searchModel) {
+                const int count = m_searchModel->count();
+                m_searchCount->setText(count > 0 ? tr("%1 处").arg(count) : tr("无结果"));
+            }
         }
     });
 
@@ -197,6 +202,7 @@ ReaderWorkspace::ReaderWorkspace(DocumentSession *session, QWidget *parent)
     connect(m_view, &PdfView::zoomChanged, this, &ReaderWorkspace::onZoomChanged);
     connect(m_view, &PdfView::rotationChanged, this, &ReaderWorkspace::onRotationChanged);
     connect(m_view, &PdfView::navigated, this, &ReaderWorkspace::onNavigated);
+    connect(m_view, &PdfView::aboutToNavigate, this, &ReaderWorkspace::onAboutToNavigate);
     connect(m_view, &PdfView::layoutModeChanged, this,
             &ReaderWorkspace::onLayoutModeChanged);
     connect(m_view, &PdfView::firstPageAloneChanged, this,
@@ -253,6 +259,10 @@ ReaderWorkspace::ReaderWorkspace(DocumentSession *session, QWidget *parent)
     m_thumbRefreshTimer->setSingleShot(true);
     m_thumbRefreshTimer->setInterval(250);
     connect(m_thumbRefreshTimer, &QTimer::timeout, this, [this] { requestNearbyThumbnails(); });
+    if (m_thumbnailList) {
+        connect(m_thumbnailList->verticalScrollBar(), &QScrollBar::valueChanged,
+                m_thumbRefreshTimer, [this] { m_thumbRefreshTimer->start(); });
+    }
 
     if (m_session) {
         connect(m_session, &DocumentSession::dirtyChanged, this, [this](bool dirty) {
@@ -302,8 +312,6 @@ void ReaderWorkspace::buildUi()
     root->addWidget(m_contextToolBar);
 
     m_searchBar = buildSearchBar();
-    root->addWidget(m_searchBar);
-    m_searchBar->hide();
 
     m_splitter = new QSplitter(Qt::Horizontal, this);
     m_leftDock = buildLeftDock();
@@ -323,12 +331,28 @@ void ReaderWorkspace::buildUi()
         if (m_rightDock)
             m_rightDock->setVisible(settings.readerRightVisible);
     } else {
-        m_splitter->setSizes({360, 720, 340});
+        m_splitter->setSizes({250, 900, 340});
     }
     root->addWidget(m_splitter, 1);
 
     m_bottomBar = buildBottomBar();
     root->addWidget(m_bottomBar);
+
+    m_exitFullscreenButton = new QToolButton(m_view);
+    m_exitFullscreenButton->setObjectName(QStringLiteral("readerExitFullscreen"));
+    m_exitFullscreenButton->setIcon(IconManager::instance()->icon(QStringLiteral("x")));
+    m_exitFullscreenButton->setText(tr("退出全屏"));
+    m_exitFullscreenButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_exitFullscreenButton->setAutoRaise(false);
+    m_exitFullscreenButton->setToolTip(tr("退出全屏 (F11 / Esc)"));
+    m_exitFullscreenButton->setStyleSheet(QStringLiteral(
+        "QToolButton#readerExitFullscreen { background: rgba(20, 24, 32, 190);"
+        " color: white; border: 1px solid rgba(255,255,255,90); border-radius: 6px;"
+        " padding: 4px 10px; } QToolButton#readerExitFullscreen:hover {"
+        " background: rgba(47, 111, 237, 220); }"));
+    m_exitFullscreenButton->hide();
+    connect(m_exitFullscreenButton, &QToolButton::clicked, this,
+            [this] { emit fullscreenRequested(); });
 
     connect(m_splitter, &QSplitter::splitterMoved, this, [this] {
         m_panelSaveTimer->start();
@@ -516,6 +540,7 @@ void ReaderWorkspace::applyRegionFloatingAction(int action)
 QToolBar *ReaderWorkspace::buildPrimaryToolBar()
 {
     auto *bar = new QToolBar(this);
+    bar->setObjectName(QStringLiteral("readerPrimaryToolBar"));
     bar->setMovable(false);
     bar->setFloatable(false);
     bar->setIconSize(QSize(18, 18));
@@ -540,9 +565,116 @@ QToolBar *ReaderWorkspace::buildPrimaryToolBar()
     connect(m_deleteAction, &QAction::triggered, this, &ReaderWorkspace::deleteSelected);
     bar->addSeparator();
 
+    // Reading navigation: history, previous/next page, page input and total.
+    m_backAction = new QAction(tr("导航后退"), this);
+    m_backAction->setIcon(IconManager::instance()->icon(QStringLiteral("chevron-right")));
+    m_backAction->setToolTip(tr("导航后退 (Alt+Left)"));
+    m_backAction->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Left));
+    m_backAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    addAction(m_backAction);
+    connect(m_backAction, &QAction::triggered, this, &ReaderWorkspace::navigateBack);
+    m_forwardAction = new QAction(tr("导航前进"), this);
+    m_forwardAction->setIcon(IconManager::instance()->icon(QStringLiteral("chevron-right")));
+    m_forwardAction->setToolTip(tr("导航前进 (Alt+Right)"));
+    m_forwardAction->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Right));
+    m_forwardAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    addAction(m_forwardAction);
+    connect(m_forwardAction, &QAction::triggered, this, &ReaderWorkspace::navigateForward);
+    // Mirror the chevron for Back so the two history buttons are unambiguous.
+    m_backAction->setIcon(QIcon(IconManager::instance()->icon(QStringLiteral("chevron-right"))
+                                    .pixmap(18, 18).transformed(QTransform::fromScale(-1, 1))));
+    bar->addAction(m_backAction);
+    bar->addAction(m_forwardAction);
+
+    m_prevPageButton = new QToolButton(bar);
+    m_prevPageButton->setText(QStringLiteral("‹"));
+    m_prevPageButton->setToolTip(tr("上一页 / 上一组 (PageUp)"));
+    m_prevPageButton->setAutoRaise(true);
+    connect(m_prevPageButton, &QToolButton::clicked, this, &ReaderWorkspace::goToPreviousPage);
+    bar->addWidget(m_prevPageButton);
+
+    m_pageSpin = new QLineEdit(bar);
+    m_pageSpin->setObjectName(QStringLiteral("readerPageEdit"));
+    m_pageValidator = new QIntValidator(1, 1, m_pageSpin);
+    m_pageSpin->setValidator(m_pageValidator);
+    m_pageSpin->setAlignment(Qt::AlignCenter);
+    m_pageSpin->setFixedWidth(54);
+    m_pageSpin->setToolTip(tr("输入页码后回车"));
+    connect(m_pageSpin, &QLineEdit::returnPressed, this, [this] {
+        bool ok = false;
+        const int page = m_pageSpin->text().toInt(&ok);
+        if (ok)
+            goToPageFromSpin(page);
+        else
+            onPageChanged(m_view ? m_view->currentPage() : 0);
+    });
+    bar->addWidget(m_pageSpin);
+    m_pageTotalLabel = new QLabel(QStringLiteral("/ 1"), bar);
+    m_pageTotalLabel->setMinimumWidth(34);
+    bar->addWidget(m_pageTotalLabel);
+
+    m_nextPageButton = new QToolButton(bar);
+    m_nextPageButton->setText(QStringLiteral("›"));
+    m_nextPageButton->setToolTip(tr("下一页 / 下一组 (PageDown)"));
+    m_nextPageButton->setAutoRaise(true);
+    connect(m_nextPageButton, &QToolButton::clicked, this, &ReaderWorkspace::goToNextPage);
+    bar->addWidget(m_nextPageButton);
+    bar->addSeparator();
+
+    // Zoom group.
+    auto *zoomOut = bar->addAction(IconManager::instance()->icon(QStringLiteral("zoom-out")),
+                                   tr("缩小"));
+    connect(zoomOut, &QAction::triggered, m_view, &PdfView::zoomOut);
+    m_zoomCombo = new QComboBox(bar);
+    m_zoomCombo->setEditable(true);
+    m_zoomCombo->setFixedWidth(84);
+    for (int percent : {25, 50, 75, 100, 125, 150, 200, 300, 400})
+        m_zoomCombo->addItem(QStringLiteral("%1%").arg(percent), percent);
+    connect(m_zoomCombo, &QComboBox::activated, this, &ReaderWorkspace::zoomEdited);
+    if (m_zoomCombo->lineEdit())
+        connect(m_zoomCombo->lineEdit(), &QLineEdit::editingFinished, this,
+                &ReaderWorkspace::zoomEdited);
+    bar->addWidget(m_zoomCombo);
+    auto *zoomIn = bar->addAction(IconManager::instance()->icon(QStringLiteral("zoom-in")),
+                                  tr("放大"));
+    connect(zoomIn, &QAction::triggered, m_view, &PdfView::zoomIn);
+    auto *fitWidth = bar->addAction(tr("适宽"), m_view, &PdfView::fitWidth);
+    fitWidth->setToolTip(tr("适合宽度"));
+    auto *fitPage = bar->addAction(tr("适页"), m_view, &PdfView::fitPage);
+    fitPage->setToolTip(tr("适合页面"));
+    bar->addSeparator();
+
+    // Layout: orthogonal single/double + continuous toggle.
+    auto *layoutGroup = new QActionGroup(this);
+    layoutGroup->setExclusive(true);
+    m_singlePageAction = bar->addAction(IconManager::instance()->icon(QStringLiteral("file-text")),
+                                        tr("单页"));
+    m_singlePageAction->setCheckable(true);
+    m_singlePageAction->setToolTip(tr("单页阅读"));
+    layoutGroup->addAction(m_singlePageAction);
+    m_doublePageAction = bar->addAction(IconManager::instance()->icon(QStringLiteral("book-open")),
+                                        tr("双页"));
+    m_doublePageAction->setCheckable(true);
+    m_doublePageAction->setToolTip(tr("双页/页对阅读"));
+    layoutGroup->addAction(m_doublePageAction);
+    connect(m_singlePageAction, &QAction::triggered, this, &ReaderWorkspace::onLayoutControlsChanged);
+    connect(m_doublePageAction, &QAction::triggered, this, &ReaderWorkspace::onLayoutControlsChanged);
+    m_continuousCheck = new QCheckBox(tr("连续"), bar);
+    m_continuousCheck->setToolTip(tr("连续滚动阅读"));
+    connect(m_continuousCheck, &QCheckBox::toggled, this, &ReaderWorkspace::onLayoutControlsChanged);
+    bar->addWidget(m_continuousCheck);
+    m_firstPageAloneCheck = new QCheckBox(tr("首页单独"), bar);
+    m_firstPageAloneCheck->setToolTip(tr("双页模式下首页单独显示"));
+    connect(m_firstPageAloneCheck, &QCheckBox::toggled, this,
+            &ReaderWorkspace::onFirstPageAloneChanged);
+    bar->addWidget(m_firstPageAloneCheck);
+    auto *rotate = bar->addAction(IconManager::instance()->icon(QStringLiteral("rotate-cw")),
+                                  tr("旋转"));
+    connect(rotate, &QAction::triggered, this, [this] { m_view->rotateBy(90); });
+    bar->addSeparator();
+
     auto *group = new QActionGroup(this);
     group->setExclusive(true);
-
     auto addTool = [&](PdfView::Tool tool, const QString &iconName, const QString &text) {
         QAction *action = bar->addAction(IconManager::instance()->icon(iconName), text);
         action->setCheckable(true);
@@ -556,7 +688,6 @@ QToolBar *ReaderWorkspace::buildPrimaryToolBar()
         });
         return action;
     };
-
     addTool(PdfView::Tool::Select, QStringLiteral("mouse-pointer-2"), tr("选择/移动"));
     addTool(PdfView::Tool::Hand, QStringLiteral("hand"), tr("抓手"));
     addTool(PdfView::Tool::RegionSelect, QStringLiteral("scan"), tr("框选"));
@@ -579,6 +710,46 @@ QToolBar *ReaderWorkspace::buildPrimaryToolBar()
                                      tr("区域摘录"));
     m_captureAction->setToolTip(tr("把当前页区域截图插入笔记"));
     connect(m_captureAction, &QAction::triggered, this, &ReaderWorkspace::startRegionCapture);
+    bar->addSeparator();
+
+    m_searchAction = new QAction(tr("查找"), this);
+    m_searchAction->setIcon(IconManager::instance()->icon(QStringLiteral("search")));
+    m_searchAction->setShortcut(QKeySequence::Find);
+    m_searchAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    m_searchAction->setToolTip(tr("查找 (Ctrl+F)"));
+    addAction(m_searchAction);
+    connect(m_searchAction, &QAction::triggered, this, &ReaderWorkspace::openSearchPanel);
+    bar->addAction(m_searchAction);
+    m_bookmarkAction = new QAction(tr("添加书签"), this);
+    m_bookmarkAction->setIcon(IconManager::instance()->icon(QStringLiteral("bookmark")));
+    m_bookmarkAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_B));
+    m_bookmarkAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    m_bookmarkAction->setToolTip(tr("添加书签 (Ctrl+B)"));
+    addAction(m_bookmarkAction);
+    connect(m_bookmarkAction, &QAction::triggered, this, &ReaderWorkspace::addBookmarkHere);
+    bar->addAction(m_bookmarkAction);
+
+    m_leftToggle = new QToolButton(bar);
+    m_leftToggle->setIcon(IconManager::instance()->icon(QStringLiteral("panel-left-close")));
+    m_leftToggle->setCheckable(true);
+    m_leftToggle->setChecked(true);
+    m_leftToggle->setAutoRaise(true);
+    m_leftToggle->setToolTip(tr("显示/隐藏左侧栏"));
+    connect(m_leftToggle, &QToolButton::toggled, this, &ReaderWorkspace::updatePanelVisibility);
+    bar->addWidget(m_leftToggle);
+    m_rightToggle = new QToolButton(bar);
+    m_rightToggle->setIcon(IconManager::instance()->icon(QStringLiteral("panel-right-close")));
+    m_rightToggle->setCheckable(true);
+    m_rightToggle->setChecked(true);
+    m_rightToggle->setAutoRaise(true);
+    m_rightToggle->setToolTip(tr("显示/隐藏右侧栏"));
+    connect(m_rightToggle, &QToolButton::toggled, this, &ReaderWorkspace::updatePanelVisibility);
+    bar->addWidget(m_rightToggle);
+    m_fullscreenAction = new QAction(tr("全屏"), this);
+    m_fullscreenAction->setIcon(IconManager::instance()->icon(QStringLiteral("layout-grid")));
+    m_fullscreenAction->setToolTip(tr("全屏 (F11)"));
+    connect(m_fullscreenAction, &QAction::triggered, this, [this] { emit fullscreenRequested(); });
+    bar->addAction(m_fullscreenAction);
 
     updateToolActions();
     return bar;
@@ -720,143 +891,73 @@ QToolBar *ReaderWorkspace::buildContextToolBar()
 QWidget *ReaderWorkspace::buildBottomBar()
 {
     auto *bar = new QWidget(this);
+    bar->setObjectName(QStringLiteral("readerStatusBar"));
     auto *layout = new QHBoxLayout(bar);
-    layout->setContentsMargins(8, 3, 8, 3);
-    layout->setSpacing(6);
+    layout->setContentsMargins(8, 2, 8, 2);
+    layout->setSpacing(12);
 
-    layout->addWidget(new QLabel(tr("页"), bar));
-    m_pageSpin = new QSpinBox(bar);
-    m_pageSpin->setMinimum(1);
-    m_pageSpin->setMaximum(1);
-    m_pageSpin->setFixedWidth(72);
-    m_pageSpin->setKeyboardTracking(false);
-    layout->addWidget(m_pageSpin);
-    connect(m_pageSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
-            &ReaderWorkspace::goToPageFromSpin);
-
-    layout->addSpacing(6);
-    m_zoomCombo = new QComboBox(bar);
-    m_zoomCombo->setEditable(true);
-    m_zoomCombo->setFixedWidth(92);
-    for (int percent : {25, 50, 75, 100, 125, 150, 200, 300, 400})
-        m_zoomCombo->addItem(QStringLiteral("%1%").arg(percent), percent);
-    layout->addWidget(m_zoomCombo);
-    connect(m_zoomCombo, &QComboBox::activated, this, &ReaderWorkspace::zoomEdited);
-    if (m_zoomCombo->lineEdit())
-        connect(m_zoomCombo->lineEdit(), &QLineEdit::editingFinished, this,
-                &ReaderWorkspace::zoomEdited);
-
-    auto addButton = [&](const QString &icon, const QString &tip, auto slot) {
-        auto *button = new QToolButton(bar);
-        button->setIcon(IconManager::instance()->icon(icon));
-        button->setToolTip(tip);
-        button->setAutoRaise(true);
-        connect(button, &QToolButton::clicked, this, slot);
-        layout->addWidget(button);
-        return button;
-    };
-    addButton(QStringLiteral("zoom-out"), tr("缩小"), [this] { m_view->zoomOut(); });
-    addButton(QStringLiteral("zoom-in"), tr("放大"), [this] { m_view->zoomIn(); });
-    addButton(QStringLiteral("minus"), tr("适合宽度"), [this] { m_view->fitWidth(); });
-    addButton(QStringLiteral("layout-grid"), tr("适合页面"), [this] { m_view->fitPage(); });
-    addButton(QStringLiteral("rotate-cw"), tr("顺时针旋转 90°"), [this] { m_view->rotateBy(90); });
-
-    layout->addSpacing(6);
-    m_layoutCombo = new QComboBox(bar);
-    m_layoutCombo->setFixedWidth(112);
-    m_layoutCombo->addItem(tr("单页"), static_cast<int>(PageLayoutMode::SinglePage));
-    m_layoutCombo->addItem(tr("连续单页"), static_cast<int>(PageLayoutMode::ContinuousSingle));
-    m_layoutCombo->addItem(tr("双页"), static_cast<int>(PageLayoutMode::FacingPages));
-    m_layoutCombo->addItem(tr("连续双页"), static_cast<int>(PageLayoutMode::ContinuousFacing));
-    m_layoutCombo->setCurrentIndex(1);
-    layout->addWidget(m_layoutCombo);
-    connect(m_layoutCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
-        if (index >= 0)
-            m_view->setLayoutMode(static_cast<PageLayoutMode>(m_layoutCombo->itemData(index).toInt()));
-    });
-    m_firstPageAloneCheck = new QCheckBox(tr("首页单独"), bar);
-    m_firstPageAloneCheck->setChecked(true);
-    layout->addWidget(m_firstPageAloneCheck);
-    connect(m_firstPageAloneCheck, &QCheckBox::toggled, this,
-            &ReaderWorkspace::onFirstPageAloneChanged);
-
-    m_backAction = new QAction(QStringLiteral("←"), this);
-    m_backAction->setToolTip(tr("后退 (Alt+Left)"));
-    m_backAction->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Left));
-    m_backAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
-    addAction(m_backAction);
-    connect(m_backAction, &QAction::triggered, this, &ReaderWorkspace::navigateBack);
-    m_forwardAction = new QAction(QStringLiteral("→"), this);
-    m_forwardAction->setToolTip(tr("前进 (Alt+Right)"));
-    m_forwardAction->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Right));
-    m_forwardAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
-    addAction(m_forwardAction);
-    connect(m_forwardAction, &QAction::triggered, this, &ReaderWorkspace::navigateForward);
-    m_searchAction = new QAction(tr("搜索"), this);
-    m_searchAction->setShortcut(QKeySequence::Find);
-    m_searchAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
-    addAction(m_searchAction);
-    connect(m_searchAction, &QAction::triggered, this, &ReaderWorkspace::toggleSearchBar);
-    m_bookmarkAction = new QAction(tr("书签"), this);
-    m_bookmarkAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_B));
-    m_bookmarkAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
-    addAction(m_bookmarkAction);
-    connect(m_bookmarkAction, &QAction::triggered, this, &ReaderWorkspace::addBookmarkHere);
-    m_fullscreenAction = new QAction(tr("全屏"), this);
-    m_fullscreenAction->setToolTip(tr("全屏 (F11)"));
-    addAction(m_fullscreenAction);
-    connect(m_fullscreenAction, &QAction::triggered, this, [this] { emit fullscreenRequested(); });
-
-    auto addActionButton = [&](QAction *action) {
-        auto *button = new QToolButton(bar);
-        button->setDefaultAction(action);
-        button->setAutoRaise(true);
-        button->setToolButtonStyle(Qt::ToolButtonTextOnly);
-        layout->addWidget(button);
-    };
-    addActionButton(m_backAction);
-    addActionButton(m_forwardAction);
-    auto *searchButton = new QToolButton(bar);
-    searchButton->setDefaultAction(m_searchAction);
-    searchButton->setIcon(IconManager::instance()->icon(QStringLiteral("search")));
-    searchButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    searchButton->setAutoRaise(true);
-    layout->addWidget(searchButton);
-    auto *bookmarkButton = new QToolButton(bar);
-    bookmarkButton->setDefaultAction(m_bookmarkAction);
-    bookmarkButton->setIcon(IconManager::instance()->icon(QStringLiteral("bookmark")));
-    bookmarkButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    bookmarkButton->setAutoRaise(true);
-    layout->addWidget(bookmarkButton);
-    auto *fullButton = new QToolButton(bar);
-    fullButton->setDefaultAction(m_fullscreenAction);
-    fullButton->setText(QStringLiteral("⛶"));
-    fullButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    fullButton->setAutoRaise(true);
-    layout->addWidget(fullButton);
-
-    layout->addStretch(1);
     m_saveStateLabel = new QLabel(bar);
     m_saveStateLabel->setObjectName(QStringLiteral("readerSaveState"));
     layout->addWidget(m_saveStateLabel);
-    m_leftToggle = new QToolButton(bar);
-    m_leftToggle->setIcon(IconManager::instance()->icon(QStringLiteral("panel-left-close")));
-    m_leftToggle->setCheckable(true);
-    m_leftToggle->setChecked(true);
-    m_leftToggle->setAutoRaise(true);
-    m_leftToggle->setToolTip(tr("显示/隐藏左侧栏"));
-    connect(m_leftToggle, &QToolButton::toggled, this, &ReaderWorkspace::updatePanelVisibility);
-    layout->addWidget(m_leftToggle);
-    m_rightToggle = new QToolButton(bar);
-    m_rightToggle->setIcon(IconManager::instance()->icon(QStringLiteral("panel-right-close")));
-    m_rightToggle->setCheckable(true);
-    m_rightToggle->setChecked(true);
-    m_rightToggle->setAutoRaise(true);
-    m_rightToggle->setToolTip(tr("显示/隐藏右侧栏"));
-    connect(m_rightToggle, &QToolButton::toggled, this, &ReaderWorkspace::updatePanelVisibility);
-    layout->addWidget(m_rightToggle);
-
+    m_statusLabel = new QLabel(bar);
+    m_statusLabel->setObjectName(QStringLiteral("readerStatusMessage"));
+    m_statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(m_statusLabel, 1);
+    m_statusInfoLabel = new QLabel(bar);
+    m_statusInfoLabel->setObjectName(QStringLiteral("readerStatusInfo"));
+    m_statusInfoLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    layout->addWidget(m_statusInfoLabel);
     return bar;
+}
+
+void ReaderWorkspace::goToPreviousPage()
+{
+    m_view->navigatePageStep(-1);
+}
+
+void ReaderWorkspace::goToNextPage()
+{
+    m_view->navigatePageStep(1);
+}
+
+void ReaderWorkspace::onLayoutControlsChanged()
+{
+    if (!m_view || m_syncingControls)
+        return;
+    const bool doublePage = m_doublePageAction && m_doublePageAction->isChecked();
+    const bool continuous = m_continuousCheck && m_continuousCheck->isChecked();
+    PageLayoutMode mode = PageLayoutMode::ContinuousSingle;
+    if (doublePage)
+        mode = continuous ? PageLayoutMode::ContinuousFacing : PageLayoutMode::FacingPages;
+    else
+        mode = continuous ? PageLayoutMode::ContinuousSingle : PageLayoutMode::SinglePage;
+    if (m_view->layoutMode() != mode)
+        m_view->setLayoutMode(mode);
+    updateLayoutControls();
+}
+
+void ReaderWorkspace::updateLayoutControls()
+{
+    if (!m_view)
+        return;
+    m_syncingControls = true;
+    const PageLayoutMode mode = m_view->layoutMode();
+    const bool facing = mode == PageLayoutMode::FacingPages
+                        || mode == PageLayoutMode::ContinuousFacing;
+    const bool continuous = mode == PageLayoutMode::ContinuousSingle
+                            || mode == PageLayoutMode::ContinuousFacing;
+    if (m_singlePageAction)
+        m_singlePageAction->setChecked(!facing);
+    if (m_doublePageAction)
+        m_doublePageAction->setChecked(facing);
+    if (m_continuousCheck)
+        m_continuousCheck->setChecked(continuous);
+    if (m_firstPageAloneCheck) {
+        m_firstPageAloneCheck->setVisible(facing);
+        m_firstPageAloneCheck->setEnabled(facing);
+        m_firstPageAloneCheck->setChecked(m_view->firstPageAlone());
+    }
+    m_syncingControls = false;
 }
 
 QWidget *ReaderWorkspace::buildLeftDock()
@@ -884,7 +985,7 @@ QWidget *ReaderWorkspace::buildLeftDock()
 
     m_thumbnailList = new QListWidget(m_leftTabs);
     m_thumbnailList->setViewMode(QListView::IconMode);
-    m_thumbnailList->setIconSize(QSize(120, 158));
+    m_thumbnailList->setIconSize(QSize(116, 154));
     m_thumbnailList->setGridSize(QSize(138, 188));
     m_thumbnailList->setResizeMode(QListView::Adjust);
     m_thumbnailList->setMovement(QListView::Static);
@@ -894,41 +995,18 @@ QWidget *ReaderWorkspace::buildLeftDock()
             &ReaderWorkspace::onThumbnailActivated);
     m_leftTabs->addTab(m_thumbnailList, tr("页面"));
 
-    auto *annotationsPage = new QWidget(m_leftTabs);
-    auto *annotationLayout = new QVBoxLayout(annotationsPage);
-    annotationLayout->setContentsMargins(4, 4, 4, 4);
-    annotationLayout->setSpacing(4);
-    auto *filterRow = new QHBoxLayout;
-    m_annotationFilter = new QComboBox(annotationsPage);
-    m_annotationFilter->addItem(tr("全部类型"), QString());
-    m_annotationFilter->addItem(tr("文本高亮"), QStringLiteral("text_highlight"));
-    m_annotationFilter->addItem(tr("下划线"), QStringLiteral("underline"));
-    m_annotationFilter->addItem(tr("删除线"), QStringLiteral("strikeout"));
-    m_annotationFilter->addItem(tr("直线"), QStringLiteral("line"));
-    m_annotationFilter->addItem(tr("矩形"), QStringLiteral("rectangle"));
-    m_annotationFilter->addItem(tr("椭圆"), QStringLiteral("ellipse"));
-    m_annotationFilter->addItem(tr("铅笔"), QStringLiteral("pencil"));
-    m_annotationFilter->addItem(tr("荧光笔"), QStringLiteral("highlighter"));
-    m_annotationFilter->addItem(tr("附着笔记"), QStringLiteral("note_point"));
-    filterRow->addWidget(m_annotationFilter, 1);
-    m_noteOnlyCheck = new QCheckBox(tr("仅有笔记"), annotationsPage);
-    filterRow->addWidget(m_noteOnlyCheck);
-    annotationLayout->addLayout(filterRow);
-    m_annotationList = new QListWidget(annotationsPage);
-    m_annotationList->setWordWrap(true);
-    annotationLayout->addWidget(m_annotationList, 1);
-    connect(m_annotationList, &QListWidget::itemClicked, this,
-            &ReaderWorkspace::onNoteListItemActivated);
-    connect(m_annotationList, &QListWidget::itemActivated, this,
-            &ReaderWorkspace::onNoteListItemActivated);
-    connect(m_annotationFilter, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-            &ReaderWorkspace::refreshAnnotationList);
-    connect(m_noteOnlyCheck, &QCheckBox::toggled, this,
-            &ReaderWorkspace::refreshAnnotationList);
-    m_leftTabs->addTab(annotationsPage, tr("标注"));
     m_leftTabs->addTab(buildBookmarkTab(), tr("书签"));
+    m_leftTabs->addTab(m_searchBar, tr("查找"));
+    m_previousLeftTab = 0;
 
-    m_leftTabs->setMinimumWidth(340);
+    m_leftTabs->tabBar()->setExpanding(true);
+    m_leftTabs->tabBar()->setUsesScrollButtons(false);
+    m_leftTabs->tabBar()->setStyleSheet(QStringLiteral(
+        "QTabBar::tab { padding-left: 3px; padding-right: 3px; }"));
+    connect(m_leftTabs, &QTabWidget::currentChanged, this, [this](int) {
+        requestNearbyThumbnails();
+    });
+    m_leftTabs->setMinimumWidth(160);
     return m_leftTabs;
 }
 
@@ -936,6 +1014,8 @@ QWidget *ReaderWorkspace::buildRightDock()
 {
     m_rightTabs = new QTabWidget(this);
     m_rightTabs->setDocumentMode(true);
+    m_rightTabs->addTab(buildAnnotationTab(),
+                        IconManager::instance()->icon(QStringLiteral("list")), tr("标注"));
     m_rightTabs->addTab(m_notePanel,
                         IconManager::instance()->icon(QStringLiteral("sticky-note")), tr("笔记"));
 
@@ -947,6 +1027,87 @@ QWidget *ReaderWorkspace::buildRightDock()
                         IconManager::instance()->icon(QStringLiteral("info")), tr("详情"));
     m_rightTabs->setMinimumWidth(260);
     return m_rightTabs;
+}
+
+QWidget *ReaderWorkspace::buildAnnotationTab()
+{
+    auto *page = new QWidget(m_rightTabs);
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(6, 6, 6, 6);
+    layout->setSpacing(6);
+
+    auto *filterRow = new QHBoxLayout;
+    m_annotationFilter = new QComboBox(page);
+    m_annotationFilter->addItem(tr("全部类型"), QString());
+    m_annotationFilter->addItem(tr("文本高亮"), QStringLiteral("text_highlight"));
+    m_annotationFilter->addItem(tr("下划线"), QStringLiteral("underline"));
+    m_annotationFilter->addItem(tr("删除线"), QStringLiteral("strikeout"));
+    m_annotationFilter->addItem(tr("直线"), QStringLiteral("line"));
+    m_annotationFilter->addItem(tr("矩形"), QStringLiteral("rectangle"));
+    m_annotationFilter->addItem(tr("椭圆"), QStringLiteral("ellipse"));
+    m_annotationFilter->addItem(tr("铅笔"), QStringLiteral("pencil"));
+    m_annotationFilter->addItem(tr("荧光笔"), QStringLiteral("highlighter"));
+    m_annotationFilter->addItem(tr("笔记点"), QStringLiteral("note_point"));
+    filterRow->addWidget(m_annotationFilter, 1);
+    m_annotationSort = new QComboBox(page);
+    m_annotationSort->addItem(tr("创建顺序"), 0);
+    m_annotationSort->addItem(tr("按页"), 1);
+    m_annotationSort->addItem(tr("最近修改"), 2);
+    filterRow->addWidget(m_annotationSort);
+    layout->addLayout(filterRow);
+
+    m_noteOnlyCheck = new QCheckBox(tr("仅有笔记"), page);
+    layout->addWidget(m_noteOnlyCheck);
+    m_annotationList = new QListWidget(page);
+    m_annotationList->setWordWrap(true);
+    m_annotationList->setSelectionMode(QAbstractItemView::SingleSelection);
+    layout->addWidget(m_annotationList, 1);
+    m_annotationNotShown = new QLabel(tr("当前标注被筛选条件隐藏"), page);
+    m_annotationNotShown->setWordWrap(true);
+    m_annotationNotShown->hide();
+    layout->addWidget(m_annotationNotShown);
+
+    auto *splitter = new QSplitter(Qt::Vertical, page);
+    m_annotationPreview = new QLabel(tr("选择页面中的标注，或从上方列表选择。"), page);
+    m_annotationPreview->setWordWrap(true);
+    m_annotationPreview->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_annotationPreview->setMinimumHeight(64);
+    splitter->addWidget(m_annotationPreview);
+    auto *actions = new QWidget(page);
+    auto *actionRow = new QHBoxLayout(actions);
+    actionRow->setContentsMargins(0, 0, 0, 0);
+    auto *locateButton = new QPushButton(tr("定位"), actions);
+    auto *noteButton = new QPushButton(tr("笔记"), actions);
+    auto *deleteButton = new QPushButton(tr("删除"), actions);
+    actionRow->addWidget(locateButton);
+    actionRow->addWidget(noteButton);
+    actionRow->addWidget(deleteButton);
+    actionRow->addStretch(1);
+    splitter->addWidget(actions);
+    splitter->setStretchFactor(0, 1);
+    splitter->setStretchFactor(1, 0);
+    layout->addWidget(splitter, 1);
+
+    connect(m_annotationList, &QListWidget::itemClicked, this,
+            &ReaderWorkspace::onNoteListItemActivated);
+    connect(m_annotationList, &QListWidget::itemDoubleClicked, this,
+            [this](QListWidgetItem *item) {
+                onNoteListItemActivated(item);
+                beginNoteEdit();
+            });
+    connect(m_annotationFilter, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &ReaderWorkspace::refreshAnnotationList);
+    connect(m_annotationSort, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &ReaderWorkspace::refreshAnnotationList);
+    connect(m_noteOnlyCheck, &QCheckBox::toggled, this,
+            &ReaderWorkspace::refreshAnnotationList);
+    connect(locateButton, &QPushButton::clicked, this, [this] {
+        if (const Annotation *annotation = currentAnnotation())
+            m_view->revealAnnotation(annotation->id);
+    });
+    connect(noteButton, &QPushButton::clicked, this, &ReaderWorkspace::beginNoteEdit);
+    connect(deleteButton, &QPushButton::clicked, this, &ReaderWorkspace::deleteSelected);
+    return page;
 }
 
 QWidget *ReaderWorkspace::buildDetailPane()
@@ -1012,19 +1173,7 @@ void ReaderWorkspace::refreshAll()
         m_historyIndex = 0;
     }
     updateHistoryActions();
-    if (m_firstPageAloneCheck)
-        m_firstPageAloneCheck->setEnabled(m_view->layoutMode() == PageLayoutMode::FacingPages
-                                         || m_view->layoutMode() == PageLayoutMode::ContinuousFacing);
-    if (m_layoutCombo) {
-        const QSignalBlocker blocker(m_layoutCombo);
-        const int index = m_layoutCombo->findData(static_cast<int>(m_view->layoutMode()));
-        if (index >= 0)
-            m_layoutCombo->setCurrentIndex(index);
-    }
-    if (m_firstPageAloneCheck) {
-        const QSignalBlocker blocker(m_firstPageAloneCheck);
-        m_firstPageAloneCheck->setChecked(m_view->firstPageAlone());
-    }
+    updateLayoutControls();
     updateBottomStatus();
     updateDetailPanel();
     updateNotePanel();
@@ -1046,11 +1195,13 @@ void ReaderWorkspace::refreshOutline()
 
 void ReaderWorkspace::refreshThumbnails()
 {
+    updateThumbnailLayout();
     if (!m_thumbnailList)
         return;
     const QSignalBlocker blocker(m_thumbnailList);
     m_thumbnailList->clear();
     m_thumbRequests.clear();
+    m_thumbGenerated.clear();
     if (!m_view->hasDocument()) {
         m_thumbRenderer->setDocument(nullptr);
         return;
@@ -1062,7 +1213,8 @@ void ReaderWorkspace::refreshThumbnails()
         auto *item = new QListWidgetItem(QStringLiteral("%1").arg(page + 1), m_thumbnailList);
         item->setData(Qt::UserRole, page);
         item->setTextAlignment(Qt::AlignHCenter);
-        QPixmap placeholder(120, 158);
+        item->setSizeHint(QSize(132, 176));
+        QPixmap placeholder(116, 154);
         placeholder.fill(palette.color(QPalette::Base));
         item->setIcon(QIcon(placeholder));
     }
@@ -1073,14 +1225,21 @@ void ReaderWorkspace::refreshThumbnails()
 
 void ReaderWorkspace::requestNearbyThumbnails()
 {
-    if (!m_view->hasDocument() || !m_thumbnailList)
+    if (!m_view->hasDocument() || !m_thumbnailList || !m_leftTabs
+        || m_leftTabs->currentWidget() != m_thumbnailList || !m_thumbnailList->isVisible())
         return;
     const int current = m_view->currentPage();
-    const int first = qMax(0, current - 2);
-    const int last = qMin(m_view->pageCount() - 1, current + 3);
+    int first = qMax(0, current - 2);
+    int last = qMin(m_view->pageCount() - 1, current + 3);
+    const QModelIndex topIndex = m_thumbnailList->indexAt(QPoint(2, 2));
+    const QModelIndex bottomIndex = m_thumbnailList->indexAt(
+        QPoint(2, qMax(2, m_thumbnailList->viewport()->height() - 2)));
+    if (topIndex.isValid())
+        first = qMin(first, topIndex.row());
+    if (bottomIndex.isValid())
+        last = qMax(last, bottomIndex.row());
     for (int page = first; page <= last; ++page) {
-        if (m_thumbnailList->item(page) && !m_thumbnailList->item(page)->icon().isNull()
-            && m_thumbRequests.contains(page))
+        if (m_thumbGenerated.contains(page) || m_thumbRequests.contains(page))
             continue;
         const quint64 request = m_thumbRenderer->requestPage(page, QSize(160, 220));
         if (request != 0)
@@ -1097,13 +1256,20 @@ void ReaderWorkspace::onThumbnailRendered(int page, const QSize &size, const QIm
     if (m_thumbRequests.contains(page) && m_thumbRequests.value(page) != requestId)
         return;
     m_thumbRequests.remove(page);
+    m_thumbGenerated.insert(page);
     QImage oriented = image;
     if (m_view->rotation() != 0) {
         QTransform transform;
         transform.rotate(m_view->rotation());
         oriented = image.transformed(transform, Qt::SmoothTransformation);
     }
-    const QPixmap pixmap = QPixmap::fromImage(oriented).scaled(
+    QImage flattened(oriented.size(), QImage::Format_ARGB32_Premultiplied);
+    flattened.fill(Qt::white);
+    {
+        QPainter painter(&flattened);
+        painter.drawImage(0, 0, oriented);
+    }
+    const QPixmap pixmap = QPixmap::fromImage(flattened).scaled(
         QSize(116, 154), Qt::KeepAspectRatio, Qt::SmoothTransformation);
     if (QListWidgetItem *item = m_thumbnailList->item(page)) {
         item->setIcon(QIcon(pixmap));
@@ -1125,10 +1291,10 @@ void ReaderWorkspace::onOutlineActivated(const QModelIndex &index)
     const int page = index.data(static_cast<int>(QPdfBookmarkModel::Role::Page)).toInt();
     const QPointF location =
         index.data(static_cast<int>(QPdfBookmarkModel::Role::Location)).toPointF();
-    if (location.isNull())
-        m_view->goToPage(page);
-    else
-        m_view->goToPosition(page, location);
+    m_view->navigateTo(page, location,
+                       location.isNull() ? PdfView::NavigationAlignment::PageTop
+                                         : PdfView::NavigationAlignment::Center,
+                       PdfView::NavigationReason::Outline);
     m_view->setFocus();
 }
 
@@ -1142,7 +1308,20 @@ void ReaderWorkspace::refreshAnnotationList()
     const QString filter = m_annotationFilter ? m_annotationFilter->currentData().toString()
                                               : QString();
     const bool noteOnly = m_noteOnlyCheck && m_noteOnlyCheck->isChecked();
-    const auto &annotations = m_view->annotations()->annotations();
+    QVector<Annotation> annotations = m_view->annotations()->annotations();
+    const int sortMode = m_annotationSort ? m_annotationSort->currentData().toInt() : 0;
+    if (sortMode == 1) {
+        std::stable_sort(annotations.begin(), annotations.end(),
+                         [](const Annotation &a, const Annotation &b) {
+                             return a.pageIndex < b.pageIndex;
+                         });
+    } else if (sortMode == 2) {
+        std::stable_sort(annotations.begin(), annotations.end(),
+                         [](const Annotation &a, const Annotation &b) {
+                             return a.modifiedAt > b.modifiedAt;
+                         });
+    }
+    bool selectedWasShown = false;
     for (const Annotation &annotation : annotations) {
         if (!filter.isEmpty() && annotationTypeName(annotation.type) != filter)
             continue;
@@ -1150,9 +1329,32 @@ void ReaderWorkspace::refreshAnnotationList()
             continue;
         QListWidgetItem *item = makeAnnotationItem(annotation);
         m_annotationList->addItem(item);
-        if (annotation.id == id)
+        if (annotation.id == id) {
             m_annotationList->setCurrentItem(item);
+            selectedWasShown = true;
+        }
     }
+    if (m_annotationNotShown)
+        m_annotationNotShown->setVisible(!id.isEmpty() && !selectedWasShown);
+    refreshAnnotationPreview();
+}
+
+void ReaderWorkspace::refreshAnnotationPreview()
+{
+    if (!m_annotationPreview)
+        return;
+    const Annotation *annotation = currentAnnotation();
+    if (!annotation) {
+        m_annotationPreview->setText(tr("选择页面中的标注，或从上方列表选择。"));
+        return;
+    }
+    QString text = QStringLiteral("P%1 · %2\n%3")
+                       .arg(annotation->pageIndex + 1)
+                       .arg(annotationTypeDisplayName(annotation->type))
+                       .arg(annotationExcerpt(*annotation));
+    if (!annotation->note.markdown.isEmpty())
+        text += QStringLiteral("\n笔记：%1").arg(annotation->note.markdown.left(160));
+    m_annotationPreview->setText(text);
 }
 
 QListWidgetItem *ReaderWorkspace::makeAnnotationItem(const Annotation &annotation) const
@@ -1764,8 +1966,12 @@ void ReaderWorkspace::onPageChanged(int page)
 {
     if (m_pageSpin) {
         const QSignalBlocker blocker(m_pageSpin);
-        m_pageSpin->setValue(page + 1);
+        m_pageSpin->setText(QString::number(page + 1));
     }
+    if (m_prevPageButton)
+        m_prevPageButton->setEnabled(page > 0);
+    if (m_nextPageButton)
+        m_nextPageButton->setEnabled(page + 1 < m_view->pageCount());
     if (m_thumbnailList && page >= 0 && page < m_thumbnailList->count()) {
         const QSignalBlocker blocker(m_thumbnailList);
         m_thumbnailList->setCurrentRow(page);
@@ -1812,16 +2018,32 @@ void ReaderWorkspace::updateBottomStatus()
     if (!m_view)
         return;
     if (m_pageSpin) {
+        if (m_pageValidator)
+            m_pageValidator->setTop(qMax(1, m_view->pageCount()));
         const QSignalBlocker blocker(m_pageSpin);
-        m_pageSpin->setMaximum(qMax(1, m_view->pageCount()));
-        m_pageSpin->setValue(m_view->currentPage() + 1);
+        m_pageSpin->setText(QString::number(m_view->currentPage() + 1));
     }
+    if (m_pageTotalLabel)
+        m_pageTotalLabel->setText(QStringLiteral("/ %1").arg(qMax(1, m_view->pageCount())));
+    if (m_prevPageButton)
+        m_prevPageButton->setEnabled(m_view->currentPage() > 0);
+    if (m_nextPageButton)
+        m_nextPageButton->setEnabled(m_view->currentPage() + 1 < m_view->pageCount());
     if (m_zoomCombo) {
         const QSignalBlocker blocker(m_zoomCombo);
         m_zoomCombo->setEditText(QStringLiteral("%1%").arg(qRound(m_view->zoom() * 100.0)));
     }
     if (m_saveStateLabel)
         m_saveStateLabel->setText(m_session && m_session->isDirty() ? tr("未保存") : tr("已保存"));
+    if (m_statusInfoLabel) {
+        const PageLayoutMode mode = m_view->layoutMode();
+        const QString layoutName = pageLayoutModeDisplayName(mode);
+        m_statusInfoLabel->setText(tr("第 %1 / %2 页 · %3 · %4%")
+                                       .arg(m_view->currentPage() + 1)
+                                       .arg(qMax(1, m_view->pageCount()))
+                                       .arg(layoutName)
+                                       .arg(qRound(m_view->zoom() * 100.0)));
+    }
 }
 
 void ReaderWorkspace::saveCurrent()
@@ -1967,31 +2189,32 @@ QWidget *ReaderWorkspace::buildSearchBar()
     m_searchEdit->setPlaceholderText(tr("在当前 PDF 中搜索文本…"));
     m_searchEdit->setClearButtonEnabled(true);
     row->addWidget(m_searchEdit, 1);
+    outer->addLayout(row);
+
+    auto *controls = new QHBoxLayout;
     m_searchCount = new QLabel(bar);
-    m_searchCount->setMinimumWidth(64);
-    row->addWidget(m_searchCount);
+    controls->addWidget(m_searchCount, 1);
     auto *prev = new QToolButton(bar);
     prev->setText(QStringLiteral("↑"));
     prev->setToolTip(tr("上一个结果"));
     prev->setAutoRaise(true);
-    row->addWidget(prev);
+    controls->addWidget(prev);
     auto *next = new QToolButton(bar);
     next->setText(QStringLiteral("↓"));
     next->setToolTip(tr("下一个结果"));
     next->setAutoRaise(true);
-    row->addWidget(next);
+    controls->addWidget(next);
     auto *close = new QToolButton(bar);
     close->setIcon(IconManager::instance()->icon(QStringLiteral("x")));
     close->setAutoRaise(true);
     close->setToolTip(tr("关闭搜索"));
-    row->addWidget(close);
-    outer->addLayout(row);
+    controls->addWidget(close);
+    outer->addLayout(controls);
 
     m_searchResults = new QListWidget(bar);
     m_searchResults->setObjectName(QStringLiteral("readerSearchResults"));
-    m_searchResults->setMaximumHeight(130);
     m_searchResults->setWordWrap(false);
-    outer->addWidget(m_searchResults);
+    outer->addWidget(m_searchResults, 1);
 
     connect(m_searchEdit, &QLineEdit::textChanged, this, [this] {
         m_searchTimer->start();
@@ -2004,6 +2227,15 @@ QWidget *ReaderWorkspace::buildSearchBar()
             &ReaderWorkspace::activateSearchResult);
     connect(m_searchResults, &QListWidget::itemClicked, this,
             &ReaderWorkspace::activateSearchResult);
+
+    auto *nextResult = new QShortcut(QKeySequence(Qt::Key_F3), this);
+    nextResult->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(nextResult, &QShortcut::activated, this, &ReaderWorkspace::nextSearchResult);
+    auto *previousResult = new QShortcut(
+        QKeySequence(Qt::SHIFT | Qt::Key_F3), this);
+    previousResult->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(previousResult, &QShortcut::activated, this,
+            &ReaderWorkspace::previousSearchResult);
     return bar;
 }
 
@@ -2069,19 +2301,56 @@ QWidget *ReaderWorkspace::buildBookmarkTab()
 
 void ReaderWorkspace::toggleSearchBar()
 {
-    if (!m_searchBar)
+    if (!m_searchBar || !m_leftTabs)
         return;
-    if (m_searchBar->isVisible()) {
-        m_searchBar->hide();
+    const int searchIndex = m_leftTabs->indexOf(m_searchBar);
+    if (searchIndex < 0)
+        return;
+    if (m_leftToggle && !m_leftToggle->isChecked())
+        m_leftToggle->setChecked(true);
+    if (m_leftDock && !m_leftDock->isVisible())
+        m_leftDock->show();
+
+    if (m_leftTabs->currentIndex() == searchIndex) {
         if (m_searchModel)
             m_searchModel->setSearchString(QString());
         if (m_view)
             m_view->clearSearchHighlights();
+        if (m_searchResults)
+            m_searchResults->clear();
+        if (m_searchCount)
+            m_searchCount->clear();
+        m_searchHighlightRects.clear();
+        m_leftTabs->setCurrentIndex(qBound(0, m_previousLeftTab, m_leftTabs->count() - 1));
         return;
     }
-    m_searchBar->show();
-    m_searchEdit->setFocus();
-    m_searchEdit->selectAll();
+    m_previousLeftTab = m_leftTabs->currentIndex();
+    m_leftTabs->setCurrentIndex(searchIndex);
+    if (m_searchEdit) {
+        m_searchEdit->setFocus();
+        m_searchEdit->selectAll();
+    }
+}
+
+void ReaderWorkspace::openSearchPanel()
+{
+    if (!m_searchBar || !m_leftTabs)
+        return;
+    const int searchIndex = m_leftTabs->indexOf(m_searchBar);
+    if (searchIndex < 0)
+        return;
+    if (m_leftToggle && !m_leftToggle->isChecked())
+        m_leftToggle->setChecked(true);
+    if (m_leftDock && !m_leftDock->isVisible())
+        m_leftDock->show();
+    if (m_leftTabs->currentIndex() != searchIndex) {
+        m_previousLeftTab = m_leftTabs->currentIndex();
+        m_leftTabs->setCurrentIndex(searchIndex);
+    }
+    if (m_searchEdit) {
+        m_searchEdit->setFocus();
+        m_searchEdit->selectAll();
+    }
 }
 
 void ReaderWorkspace::runSearch()
@@ -2137,12 +2406,30 @@ void ReaderWorkspace::refreshSearchResults()
             highlights[link.page()].append(rect);
         ++actual;
     }
-    if (m_searchCount)
-        m_searchCount->setText(count > 0 ? tr("%1 处").arg(count) : tr("无结果"));
-    if (m_view)
-        m_view->setSearchHighlights(highlights, -1, QRectF());
+    if (m_searchCount) {
+        if (count > 0 && actual < count)
+            m_searchCount->setText(tr("%1 / %2 处").arg(actual).arg(count));
+        else
+            m_searchCount->setText(count > 0 ? tr("%1 处").arg(count) : tr("无结果"));
+    }
+    if (count == 0 && m_view)
+        showStatus(tr("没有匹配文本；扫描版 PDF 可能没有可搜索文字层"));
+    m_searchHighlightRects = highlights;
     if (m_searchResults->count() > 0 && m_searchResults->currentRow() < 0)
         m_searchResults->setCurrentRow(0);
+    if (m_view) {
+        int currentPage = -1;
+        QVector<QRectF> currentRects;
+        if (QListWidgetItem *item = m_searchResults->currentItem()) {
+            const int index = item->data(Qt::UserRole).toInt();
+            if (index >= 0 && index < m_searchModel->count()) {
+                const QPdfLink link = m_searchModel->resultAtIndex(index);
+                currentPage = link.page();
+                currentRects = link.rectangles();
+            }
+        }
+        m_view->setSearchHighlights(m_searchHighlightRects, currentPage, currentRects);
+    }
 }
 
 void ReaderWorkspace::activateSearchResult(QListWidgetItem *item)
@@ -2154,8 +2441,10 @@ void ReaderWorkspace::activateSearchResult(QListWidgetItem *item)
         return;
     const QPdfLink link = m_searchModel->resultAtIndex(index);
     QPointF point;
-    if (!link.rectangles().isEmpty())
-        point = link.rectangles().first().center();
+    const QVector<QRectF> currentRects = link.rectangles();
+    if (!currentRects.isEmpty())
+        point = currentRects.first().center();
+    m_view->setSearchHighlights(m_searchHighlightRects, link.page(), currentRects);
     m_view->navigateTo(link.page(), point, PdfView::NavigationAlignment::Center,
                        PdfView::NavigationReason::Search);
     if (m_searchResults->currentItem() != item)
@@ -2275,15 +2564,59 @@ void ReaderWorkspace::deleteSelectedBookmark()
     }
 }
 
+void ReaderWorkspace::onAboutToNavigate(int fromPage, const QPointF &fromPoint,
+                                         int targetPage, const QPointF &targetPoint,
+                                         int reason)
+{
+    Q_UNUSED(targetPage)
+    Q_UNUSED(targetPoint)
+    const auto navReason = static_cast<PdfView::NavigationReason>(reason);
+    m_pendingHistoryValid = false;
+    if (navReason == PdfView::NavigationReason::History
+        || navReason == PdfView::NavigationReason::Restore
+        || navReason == PdfView::NavigationReason::Internal
+        || navReason == PdfView::NavigationReason::Programmatic)
+        return;
+    m_pendingHistoryStart = {fromPage, fromPoint};
+    m_pendingHistoryValid = true;
+}
+
 void ReaderWorkspace::onNavigated(int pageIndex, const QPointF &pagePoint, int reason)
 {
-    if (reason == static_cast<int>(PdfView::NavigationReason::History)
-        || reason == static_cast<int>(PdfView::NavigationReason::Restore)
-        || reason == static_cast<int>(PdfView::NavigationReason::Internal))
+    const auto navReason = static_cast<PdfView::NavigationReason>(reason);
+    if (navReason == PdfView::NavigationReason::History
+        || navReason == PdfView::NavigationReason::Restore
+        || navReason == PdfView::NavigationReason::Internal
+        || navReason == PdfView::NavigationReason::Programmatic) {
+        m_pendingHistoryValid = false;
         return;
+    }
+
+    const NavPoint target{pageIndex, pagePoint};
+    if (m_pendingHistoryValid) {
+        if (m_historyIndex < 0) {
+            m_history.append(m_pendingHistoryStart);
+            m_historyIndex = 0;
+        } else if (m_history.at(m_historyIndex).page != m_pendingHistoryStart.page
+                   || m_history.at(m_historyIndex).point != m_pendingHistoryStart.point) {
+            // The user may have scrolled after the last explicit jump. Use the
+            // real departure anchor so Back returns to where reading actually
+            // happened, not to a stale history node.
+            m_history[m_historyIndex] = m_pendingHistoryStart;
+        }
+    }
+    m_pendingHistoryValid = false;
+
     if (m_historyIndex >= 0 && m_historyIndex + 1 < m_history.size())
         m_history.erase(m_history.begin() + m_historyIndex + 1, m_history.end());
-    m_history.append({pageIndex, pagePoint});
+    if (m_historyIndex >= 0) {
+        const NavPoint &current = m_history.at(m_historyIndex);
+        if (current.page == target.page && current.point == target.point) {
+            updateHistoryActions();
+            return;
+        }
+    }
+    m_history.append(target);
     while (m_history.size() > 100)
         m_history.removeFirst();
     m_historyIndex = m_history.size() - 1;
@@ -2312,6 +2645,20 @@ void ReaderWorkspace::navigateForward()
     updateHistoryActions();
 }
 
+void ReaderWorkspace::clearNavigationHistory()
+{
+    m_history.clear();
+    m_historyIndex = -1;
+    m_pendingHistoryValid = false;
+    if (m_view && m_view->hasDocument()) {
+        int page = m_view->currentPage();
+        const QPointF point = m_view->viewportAnchor(&page);
+        m_history.append({page, point});
+        m_historyIndex = 0;
+    }
+    updateHistoryActions();
+}
+
 void ReaderWorkspace::updateHistoryActions()
 {
     if (m_backAction)
@@ -2322,18 +2669,8 @@ void ReaderWorkspace::updateHistoryActions()
 
 void ReaderWorkspace::onLayoutModeChanged(PageLayoutMode mode)
 {
-    if (m_layoutCombo) {
-        const QSignalBlocker blocker(m_layoutCombo);
-        const int index = m_layoutCombo->findData(static_cast<int>(mode));
-        if (index >= 0)
-            m_layoutCombo->setCurrentIndex(index);
-    }
-    if (m_firstPageAloneCheck) {
-        m_firstPageAloneCheck->setEnabled(m_view->layoutMode() == PageLayoutMode::FacingPages
-                                         || m_view->layoutMode() == PageLayoutMode::ContinuousFacing);
-        const QSignalBlocker blocker(m_firstPageAloneCheck);
-        m_firstPageAloneCheck->setChecked(m_view->firstPageAlone());
-    }
+    Q_UNUSED(mode)
+    updateLayoutControls();
     updateBottomStatus();
 }
 
@@ -2349,9 +2686,9 @@ void ReaderWorkspace::setFullscreenMode(bool fullscreen)
 {
     if (m_fullscreen == fullscreen)
         return;
-    int page = m_view->currentPage();
-    const QPointF anchor = m_view->viewportAnchor(&page);
     if (fullscreen) {
+        m_fullscreenAnchorPage = m_view->currentPage();
+        m_fullscreenAnchorPoint = m_view->viewportAnchor(&m_fullscreenAnchorPage);
         m_fullscreenSplitterSizes = m_splitter->sizes();
         m_fullscreenLeftVisible = m_leftDock && m_leftDock->isVisible();
         m_fullscreenRightVisible = m_rightDock && m_rightDock->isVisible();
@@ -2364,6 +2701,17 @@ void ReaderWorkspace::setFullscreenMode(bool fullscreen)
             m_rightDock->hide();
         if (m_bottomBar)
             m_bottomBar->hide();
+        if (m_exitFullscreenButton) {
+            m_exitFullscreenButton->show();
+            m_exitFullscreenButton->raise();
+            positionFullscreenExit();
+        }
+        // Fullscreen resizes the viewport; restore the same page anchor after
+        // the new layout has been computed instead of jumping to page top.
+        QTimer::singleShot(0, this, [this]() {
+            if (m_fullscreen && m_fullscreenAnchorPage >= 0)
+                m_view->restoreViewportAnchor(m_fullscreenAnchorPage, m_fullscreenAnchorPoint);
+        });
     } else {
         m_primaryToolBar->show();
         m_contextToolBar->show();
@@ -2375,9 +2723,38 @@ void ReaderWorkspace::setFullscreenMode(bool fullscreen)
             m_rightDock->setVisible(m_fullscreenRightVisible);
         if (m_bottomBar)
             m_bottomBar->show();
-        m_view->restoreViewportAnchor(page, anchor);
+        if (m_exitFullscreenButton)
+            m_exitFullscreenButton->hide();
     }
     m_fullscreen = fullscreen;
+}
+
+void ReaderWorkspace::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    positionFullscreenExit();
+    updateThumbnailLayout();
+}
+
+void ReaderWorkspace::updateThumbnailLayout()
+{
+    if (!m_thumbnailList)
+        return;
+    const int available = qMax(138, m_thumbnailList->viewport()->width() - 12);
+    const int columns = qMax(1, available / 138);
+    const int cellWidth = columns == 1 ? available : available / columns;
+    m_thumbnailList->setGridSize(QSize(cellWidth, 188));
+}
+
+void ReaderWorkspace::positionFullscreenExit()
+{
+    if (!m_exitFullscreenButton || !m_view)
+        return;
+    const QSize hint = m_exitFullscreenButton->sizeHint();
+    const int x = qMax(8, m_view->width() - hint.width() - 16);
+    m_exitFullscreenButton->move(x, 12);
+    m_exitFullscreenButton->resize(hint);
+    m_exitFullscreenButton->raise();
 }
 
 

@@ -3,18 +3,19 @@
 PANO 是一款本地优先的 PDF 阅读与标注工作区。它把 PDF 视为只读源文件，在独立的书库
 目录中保存标注、阅读状态和 Markdown 笔记；不依赖账号、云端或网络。
 
-当前版本是 Phase 2 阅读与导航增强版本。在 Phase 1.2 的书库、标注和选择交互基础上，
-增加了四种页面布局、适合宽度/适合页面缩放模式、统一导航、全文搜索、书签、前进/后退、
-全屏、连续橡皮和标注复制粘贴。Phase 0 的 Demo 已归档到 [`demo/`](demo/)，根工程不再
-依赖 Demo 代码。
+当前版本是 Phase 2.1 阅读器交互与界面精修版本。在 Phase 2 的布局、搜索、书签、历史
+和全屏基础上，重排了阅读器界面：顶部两级工具栏、左侧目录/缩略图/书签/查找、右侧
+标注/笔记/详情、底部状态区；并修复全屏退出、连续橡皮、非连续滚轮翻页、页码控件、
+历史出发点和滚动范围。Phase 0 的 Demo 已归档到 [`demo/`](demo/)，根工程不再依赖
+Demo 代码。
 
-![阅读与布局](docs/development/log/phase2-reader.png)
+![阅读器](docs/development/log/phase2.1-reader.png)
 
-![全文搜索](docs/development/log/phase2-search.png)
+![查找](docs/development/log/phase2.1-search.png)
 
-![书签](docs/development/log/phase2-bookmarks.png)
+![缩略图](docs/development/log/phase2.1-thumbnails.png)
 
-![全屏阅读](docs/development/log/phase2-fullscreen.png)
+![全屏](docs/development/log/phase2.1-fullscreen.png)
 
 ## 功能
 
@@ -31,8 +32,10 @@ PANO 是一款本地优先的 PDF 阅读与标注工作区。它把 PDF 视为�
   文本选择。文本和区域选区显示贴近选区的浮动操作条；支持文字/区域右键菜单。
 - 搜索与书签：Ctrl+F 全文搜索，结果列表按页显示并可前后跳转，临时高亮不写入标注；
   Ctrl+B 添加书签，书签独立保存、重命名、排序和删除。
-- 阅读界面：两行图标工具栏（主工具 + 当前工具/对象属性）、目录/页面缩略图/标注左侧栏、
-  笔记/详情右侧栏；工具和属性可直接编辑。
+- 阅读界面：顶部主工具栏（阅读导航/缩放/布局/工具/辅助）+ 当前工具/对象属性栏；
+  左侧目录/缩略图/书签/查找，右侧标注/笔记/详情；底部仅状态区。工具和属性可直接编辑。
+- 阅读交互：页码输入 + 上一页/下一页；非连续布局滚轮翻页、组语义和反向定位；全屏
+  F11/右上角退出；导航历史记录真实出发点；大文档打开计时探针。
 - 笔记与标注操作：标注附带 Markdown 笔记、图片、区域截图和本地公式渲染；笔记 2 秒
   空闲自动保存。选择对象可复制/粘贴/复制一份，使用自定义 MIME 保留完整样式。
 - 工具预设：每个工具独立保存颜色、线宽、线型、描边、填充、透明度和混合模式；新建
@@ -106,7 +109,7 @@ xmake -j4
 ```
 
 本机配置（主题、上次书库、打开标签、映射源覆盖）放在 Qt 配置目录，不写入书库。
-完整字段与语义见 [`docs/specification/phase1-data-formats.md`](docs/specification/phase1-data-formats.md)（Phase 2 增补了布局、缩放模式和书签字段）。
+完整字段与语义见 [`docs/specification/phase1-data-formats.md`](docs/specification/phase1-data-formats.md)（Phase 2/2.1 增补了布局、缩放模式、书签字段、滚轮翻页和阅读器面板宽度）。
 
 原则：
 
@@ -125,6 +128,7 @@ xmake -j4                                  # 全部目标
 ./build/linux/x86_64/debug/pano-text-geometry-probe
 ./build/linux/x86_64/debug/pano-interaction-probe
 ./build/linux/x86_64/debug/pano-phase2-probe
+./build/linux/x86_64/debug/pano-open-timing "/path/to/book.pdf"
 ./build/linux/x86_64/debug/pano-pdf-timing examples/sample-paper.pdf
 PANO_CONFIG_DIR=/tmp/pano-config QT_QPA_PLATFORM=offscreen \
   ./build/linux/x86_64/debug/pano-theme-probe
@@ -132,10 +136,11 @@ PANO_CONFIG_DIR=/tmp/pano-config QT_QPA_PLATFORM=offscreen \
 
 探针覆盖数据安全、导入与哈希、书架不变量、标注/笔记持久化、外部修改保护、阅读状态、
 四种旋转与滚动坐标变换、文字选区合并、智能选择与浮动操作、主题与设置取消、四种页面
-布局、缩放模式、搜索/书签/导航和复制粘贴；不替代人工 GUI 验收。结果记录在
-[`docs/development/log/phase2-results.md`](docs/development/log/phase2-results.md)，
-Phase 1.2 见 [`phase1.2-results.md`](docs/development/log/phase1.2-results.md)，Phase 1.1
-见 [`phase1.1-results.md`](docs/development/log/phase1.1-results.md)。
+布局、缩放模式、搜索/书签/导航、复制粘贴、橡皮连续擦除、阅读器交互与全屏退出；不替代
+人工 GUI 验收。结果记录在
+[`docs/development/log/phase2.1-results.md`](docs/development/log/phase2.1-results.md)，
+Phase 2 见 [`phase2-results.md`](docs/development/log/phase2-results.md)，Phase 1.2 见
+[`phase1.2-results.md`](docs/development/log/phase1.2-results.md)。
 
 ## 目录
 

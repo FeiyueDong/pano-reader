@@ -18,6 +18,7 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPixmap>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPainterPath>
@@ -210,6 +211,8 @@ void PdfView::setTool(Tool tool)
 {
     if (m_tool == tool)
         return;
+    if (m_dragMode == DragMode::Erase)
+        cancelErase();
     clearTemporarySelections();
     m_tool = tool;
     m_dragMode = DragMode::None;
@@ -218,7 +221,9 @@ void PdfView::setTool(Tool tool)
     m_dragPage = -1;
     m_textSelecting = false;
     m_eraseIds.clear();
+    m_erasePreviewIds.clear();
     m_eraseRemoved.clear();
+    m_wheelAccum = 0;
     m_textHitValid = false;
     applyToolPreset(tool);
 
@@ -232,10 +237,11 @@ void PdfView::setTool(Tool tool)
     else if (tool == Tool::Note)
         shape = Qt::PointingHandCursor;
     else if (tool == Tool::Eraser)
-        shape = Qt::BlankCursor;
+        updateEraserCursor();
     else if (tool != Tool::Select)
         shape = Qt::CrossCursor;
-    viewport()->setCursor(shape);
+    if (tool != Tool::Eraser)
+        viewport()->setCursor(shape);
     viewport()->update();
     emit toolChanged(tool);
 }
@@ -573,12 +579,17 @@ void PdfView::navigateTo(int pageIndex, const QPointF &pagePoint,
         return;
 
     const bool pageChangedBefore = pageIndex != m_currentPage;
+    int fromPage = m_currentPage;
+    const QPointF fromPoint = viewportAnchor(&fromPage);
+    emit aboutToNavigate(fromPage, fromPoint, pageIndex, pagePoint, static_cast<int>(reason));
+
     m_currentPage = pageIndex;
     m_layout.setCurrentPage(pageIndex);
     if (!m_layout.isContinuous() && m_zoomMode != ZoomMode::Fixed)
         applyFitZoom();
     if (m_layout.pageRect(pageIndex).isNull())
         return;
+    updateScrollBars();
 
     const QPointF point = clampToPage(pagePoint, pageIndex);
     const QPointF contentPoint = m_layout.pageToContent(pageIndex).map(point);
@@ -588,6 +599,10 @@ void PdfView::navigateTo(int pageIndex, const QPointF &pagePoint,
     if (alignment == NavigationAlignment::Center && !pagePoint.isNull()) {
         horizontalScrollBar()->setValue(qRound(contentPoint.x() - viewport()->width() / 2.0));
         verticalScrollBar()->setValue(qRound(contentPoint.y() - viewport()->height() / 2.0));
+    } else if (alignment == NavigationAlignment::PageBottom) {
+        horizontalScrollBar()->setValue(qRound(targetRect.center().x() - viewport()->width() / 2.0));
+        verticalScrollBar()->setValue(qRound(targetRect.bottom() + m_layout.margin()
+                                             - viewport()->height()));
     } else {
         const QPointF center(targetRect.center().x(), targetRect.top() + m_layout.margin());
         horizontalScrollBar()->setValue(qRound(center.x() - viewport()->width() / 2.0));
@@ -600,14 +615,45 @@ void PdfView::navigateTo(int pageIndex, const QPointF &pagePoint,
     viewport()->update();
 }
 
+void PdfView::navigatePageStep(int direction, bool history)
+{
+    if (!hasDocument() || direction == 0)
+        return;
+    const NavigationReason reason = history ? NavigationReason::PageInput
+                                             : NavigationReason::Internal;
+    if (m_layout.isContinuous()) {
+        const qreal step = viewport()->height() * 0.9;
+        verticalScrollBar()->setValue(qRound(verticalScrollBar()->value()
+                                             + (direction > 0 ? step : -step)));
+        return;
+    }
+    const int current = qBound(0, m_currentPage, m_pageSizes.size() - 1);
+    if (direction > 0) {
+        const QVector<int> spread = m_layout.spreadPages(current);
+        const int next = (spread.isEmpty() ? current : spread.last()) + 1;
+        if (next < m_pageSizes.size())
+            navigateTo(next, QPointF(), NavigationAlignment::PageTop, reason);
+    } else {
+        const QVector<int> spread = m_layout.spreadPages(current);
+        const int previous = (spread.isEmpty() ? current : spread.first()) - 1;
+        if (previous >= 0)
+            navigateTo(previous, QPointF(), NavigationAlignment::PageBottom, reason);
+    }
+}
+
 void PdfView::revealPageRegion(int pageIndex, const QRectF &pageBounds)
 {
     if (!hasDocument() || pageIndex < 0 || pageIndex >= m_pageSizes.size())
         return;
 
+    int fromPage = m_currentPage;
+    const QPointF fromPoint = viewportAnchor(&fromPage);
+    emit aboutToNavigate(fromPage, fromPoint, pageIndex, pageBounds.center(),
+                         static_cast<int>(NavigationReason::Annotation));
     m_layout.setCurrentPage(pageIndex);
     if (m_layout.pageRect(pageIndex).isNull())
         return;
+    updateScrollBars();
     const QTransform pageToView = pageToViewTransform(pageIndex);
     const QRectF bounds = pageBounds.normalized();
     if (bounds.isEmpty()) {
@@ -824,7 +870,8 @@ void PdfView::paintEvent(QPaintEvent *event)
         painter.setClipRect(pageRectInView(page));
         painter.setTransform(pageToView);
         for (const QRectF &rect : it.value()) {
-            const bool current = page == m_searchCurrentPage && rect == m_searchCurrentRect;
+            const bool current = page == m_searchCurrentPage
+                                  && m_searchCurrentRects.contains(rect);
             painter.fillRect(rect, QColor(255, 206, 84, current ? 190 : 110));
             painter.setPen(QPen(QColor(230, 150, 0), current ? 1.5 : 0.8));
             painter.setBrush(Qt::NoBrush);
@@ -835,15 +882,6 @@ void PdfView::paintEvent(QPaintEvent *event)
 
     paintSelectionOverlay(painter);
 
-    if (m_tool == Tool::Eraser && m_lastMouseViewPos.x() >= 0) {
-        painter.save();
-        painter.setRenderHint(QPainter::Antialiasing, true);
-        painter.setPen(QPen(QColor(QStringLiteral("#2f6fed")), 1.25));
-        painter.setBrush(QColor(47, 111, 237, 36));
-        painter.drawEllipse(QPointF(m_lastMouseViewPos), m_eraserRadius, m_eraserRadius);
-        painter.restore();
-    }
-
     for (const Annotation &annotation : m_annotations.annotations()) {
         if (annotation.pageIndex < 0 || annotation.pageIndex >= m_pageSizes.size())
             continue;
@@ -853,6 +891,8 @@ void PdfView::paintEvent(QPaintEvent *event)
             && (m_dragMode == DragMode::DragAnnotation || m_dragMode == DragMode::ResizeAnnotation)) {
             continue;
         }
+        if (m_dragMode == DragMode::Erase && m_erasePreviewIds.contains(annotation.id))
+            continue;
         const QTransform pageToView = pageToViewTransform(annotation.pageIndex);
         const QRectF pageViewRect = pageRectInView(annotation.pageIndex);
         AnnotationRenderer::paint(painter, annotation, pageToView, pageViewRect,
@@ -1200,8 +1240,10 @@ void PdfView::applyFitZoom()
     const qreal zoomH = m_layout.zoom() * availableH / rect.height();
     qreal target = m_zoomMode == ZoomMode::FitWidth ? zoomW : qMin(zoomW, zoomH);
     target = qBound<qreal>(0.05, target, 12.0);
-    if (qFuzzyCompare(target, m_layout.zoom()))
+    if (qFuzzyCompare(target, m_layout.zoom())) {
+        updateScrollBars();
         return;
+    }
     rebuildLayoutAndKeepAnchor(target, m_layout.rotation(),
                                QPointF(viewport()->width() / 2.0, viewport()->height() / 2.0));
     emit zoomChanged(m_layout.zoom());
@@ -1324,21 +1366,33 @@ void PdfView::wheelEvent(QWheelEvent *event)
         event->accept();
         return;
     }
-    if (m_wheelTurnsPage && event->angleDelta().y() != 0) {
+    const int wheelDelta = event->angleDelta().y() != 0 ? event->angleDelta().y()
+                                                        : event->pixelDelta().y();
+    if (m_wheelTurnsPage && !m_layout.isContinuous() && wheelDelta != 0) {
         QScrollBar *bar = verticalScrollBar();
-        const bool atTop = bar->value() <= bar->minimum();
-        const bool atBottom = bar->value() >= bar->maximum();
-        if (event->angleDelta().y() < 0 && atBottom && m_currentPage + 1 < pageCount()) {
-            navigateTo(m_currentPage + 1, QPointF(), NavigationAlignment::PageTop,
-                       NavigationReason::PageInput);
-            event->accept();
-            return;
-        }
-        if (event->angleDelta().y() > 0 && atTop && m_currentPage > 0) {
-            navigateTo(m_currentPage - 1, QPointF(), NavigationAlignment::PageTop,
-                       NavigationReason::PageInput);
-            event->accept();
-            return;
+        const bool down = wheelDelta < 0;
+        const bool atBoundary = down ? bar->value() >= bar->maximum()
+                                     : bar->value() <= bar->minimum();
+        const bool hasScrollRoom = bar->maximum() > bar->minimum();
+        if (atBoundary) {
+            m_wheelAccum += wheelDelta;
+            if ((!hasScrollRoom || std::abs(m_wheelAccum) >= 120)
+                && !m_wheelCooldown.isValid()) {
+                const int before = m_currentPage;
+                navigatePageStep(down ? 1 : -1, false);
+                m_wheelAccum = 0;
+                if (m_currentPage != before) {
+                    m_wheelCooldown.start();
+                    event->accept();
+                    return;
+                }
+            }
+            if (!hasScrollRoom) {
+                event->accept();
+                return;
+            }
+        } else {
+            m_wheelAccum = 0;
         }
     }
     QAbstractScrollArea::wheelEvent(event);
@@ -1349,6 +1403,13 @@ void PdfView::keyPressEvent(QKeyEvent *event)
     if ((event->key() == Qt::Key_Shift) && m_draft.pageIndex >= 0
         && m_dragMode == DragMode::DrawShape) {
         updateDraw(m_draft.pageIndex, m_dragCurrentPage);
+        event->accept();
+        return;
+    }
+
+    if ((event->key() == Qt::Key_PageDown || event->key() == Qt::Key_PageUp)
+        && event->modifiers() == Qt::NoModifier) {
+        navigatePageStep(event->key() == Qt::Key_PageDown ? 1 : -1, false);
         event->accept();
         return;
     }
@@ -2054,7 +2115,10 @@ bool PdfView::handleEscape()
     m_dragPage = -1;
     m_textSelecting = false;
     m_eraseIds.clear();
+    m_erasePreviewIds.clear();
     m_eraseRemoved.clear();
+    m_eraseProtectedHinted = false;
+    m_eraseLastView = QPointF();
     clearTemporarySelections();
     selectAnnotation(QString());
     if (m_tool != Tool::Select)
@@ -2171,6 +2235,7 @@ bool PdfView::duplicateSelected()
 void PdfView::setEraserRadius(int radius)
 {
     m_eraserRadius = qBound(4, radius, 25);
+    updateEraserCursor();
     emit statusMessage(tr("橡皮半径：%1 px").arg(m_eraserRadius));
     viewport()->update();
 }
@@ -2520,11 +2585,11 @@ void PdfView::addAnnotation(const Annotation &annotation, bool selectAfter)
 }
 
 void PdfView::setSearchHighlights(const QHash<int, QVector<QRectF>> &highlights,
-                                  int currentPage, const QRectF &currentRect)
+                                  int currentPage, const QVector<QRectF> &currentRects)
 {
     m_searchHighlights = highlights;
     m_searchCurrentPage = currentPage;
-    m_searchCurrentRect = currentRect;
+    m_searchCurrentRects = currentRects;
     viewport()->update();
 }
 
@@ -2534,7 +2599,7 @@ void PdfView::clearSearchHighlights()
         return;
     m_searchHighlights.clear();
     m_searchCurrentPage = -1;
-    m_searchCurrentRect = QRectF();
+    m_searchCurrentRects.clear();
     viewport()->update();
 }
 
@@ -2623,6 +2688,42 @@ void PdfView::contextMenuEvent(QContextMenuEvent *event)
     if (!menu.isEmpty())
         menu.exec(event->globalPos());
 }
+void PdfView::updateEraserCursor()
+{
+    if (m_tool != Tool::Eraser || !viewport())
+        return;
+    const qreal dpr = devicePixelRatioF();
+    const int diameter = qMax(8, m_eraserRadius * 2);
+    const int margin = 3;
+    const int extent = diameter + margin * 2;
+    QPixmap pixmap(qCeil(extent * dpr), qCeil(extent * dpr));
+    pixmap.setDevicePixelRatio(dpr);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(QColor(255, 255, 255, 210), 3.0));
+    painter.setBrush(QColor(47, 111, 237, 38));
+    painter.drawEllipse(QRectF(margin, margin, diameter, diameter));
+    painter.setPen(QPen(QColor(47, 111, 237, 235), 1.4));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawEllipse(QRectF(margin, margin, diameter, diameter));
+    painter.end();
+    viewport()->setCursor(QCursor(pixmap, extent / 2, extent / 2));
+}
+
+void PdfView::cancelErase()
+{
+    if (m_dragMode != DragMode::Erase)
+        return;
+    m_dragMode = DragMode::None;
+    m_eraseIds.clear();
+    m_erasePreviewIds.clear();
+    m_eraseRemoved.clear();
+    m_eraseProtectedHinted = false;
+    m_eraseLastView = QPointF();
+    viewport()->update();
+}
+
 void PdfView::eraseAt(const QPointF &viewPos)
 {
     m_eraseIds.clear();
@@ -2633,30 +2734,60 @@ void PdfView::eraseAt(const QPointF &viewPos)
 
 void PdfView::eraseSegment(const QPointF &from, const QPointF &to)
 {
-    const qreal distance = QLineF(from, to).length();
-    const int steps = qMax(1, static_cast<int>(std::ceil(distance / qMax(3, m_eraserRadius / 2))));
-    for (int step = 0; step <= steps; ++step) {
-        const qreal t = steps == 0 ? 1.0 : static_cast<qreal>(step) / steps;
-        const QPointF point = from + (to - from) * t;
-        const QString hit = annotationAt(point);
-        if (hit.isEmpty() || m_eraseIds.contains(hit))
+    // Hit-test the capsule swept by the circular eraser between two mouse
+    // samples. This respects the visible circle edge and removes every object
+    // under it, not just the topmost one.
+    QPainterPath capsule;
+    if (QLineF(from, to).length() < 0.5) {
+        capsule.addEllipse(from, m_eraserRadius, m_eraserRadius);
+    } else {
+        QPainterPath line;
+        line.moveTo(from);
+        line.lineTo(to);
+        QPainterPathStroker stroker;
+        stroker.setWidth(m_eraserRadius * 2.0);
+        stroker.setCapStyle(Qt::RoundCap);
+        stroker.setJoinStyle(Qt::RoundJoin);
+        capsule = stroker.createStroke(line);
+    }
+    const QRectF capsuleBounds = capsule.boundingRect();
+
+    for (const Annotation &annotation : m_annotations.annotations()) {
+        if (annotation.pageIndex < 0 || annotation.pageIndex >= m_pageSizes.size())
             continue;
-        const Annotation *annotation = m_annotations.find(hit);
-        if (!annotation)
+        if (m_eraseIds.contains(annotation.id))
             continue;
-        if (!annotation->note.isEmpty()) {
-            emit statusMessage(tr("该标注带有笔记，已跳过；请用选择工具删除并确认"));
+        const QRectF pageViewRect = pageRectInView(annotation.pageIndex);
+        if (!pageViewRect.intersects(capsuleBounds))
+            continue;
+        QPainterPath hit = AnnotationRenderer::hitPath(annotation, 0.0);
+        if (hit.isEmpty())
+            continue;
+        const QPainterPath mapped = pageToViewTransform(annotation.pageIndex).map(hit);
+        if (!mapped.intersects(capsule))
+            continue;
+        if (!annotation.note.isEmpty()) {
+            if (!m_eraseProtectedHinted) {
+                m_eraseProtectedHinted = true;
+                emit statusMessage(tr("带笔记的标注已跳过；请用选择工具删除并确认"));
+            }
             continue;
         }
-        m_eraseIds.insert(hit);
-        m_eraseRemoved.append(*annotation);
+        m_eraseIds.insert(annotation.id);
+        m_erasePreviewIds.insert(annotation.id);
+        m_eraseRemoved.append(annotation);
     }
 }
 
 void PdfView::commitErase()
 {
     if (m_eraseRemoved.isEmpty()) {
-        emit statusMessage(tr("此处没有可删除的批注"));
+        emit statusMessage(tr("此处没有可删除的标注"));
+        m_erasePreviewIds.clear();
+        m_eraseProtectedHinted = false;
+        m_eraseLastView = QPointF();
+        m_dragMode = DragMode::None;
+        viewport()->update();
         return;
     }
     m_undoStack.push(new RemoveAnnotationsCommand(&m_annotations, m_eraseRemoved));
@@ -2664,6 +2795,9 @@ void PdfView::commitErase()
     emit statusMessage(tr("已擦除 %1 个标注").arg(m_eraseRemoved.size()));
     m_eraseRemoved.clear();
     m_eraseIds.clear();
+    m_erasePreviewIds.clear();
+    m_eraseProtectedHinted = false;
+    m_eraseLastView = QPointF();
     m_dragMode = DragMode::None;
     viewport()->update();
 }

@@ -192,3 +192,33 @@ target("pano-interaction-probe")
     if qt_prefix then
         add_rpathdirs(path.join(qt_prefix, "lib"))
     end
+
+
+target("pano-open-timing")
+    set_kind("binary")
+    add_files("tools/open_timing_probe.cpp")
+    add_files("resources/resources.qrc")
+    add_files("src/app/*.cpp")
+    add_files("src/library/*.cpp")
+    add_files("src/document/*.cpp")
+    add_files("src/pdf/*.cpp")
+    add_files("src/reader/*.cpp")
+    add_files("src/annotation/*.cpp")
+    add_files("src/note/*.cpp")
+    add_files("src/settings/*.cpp")
+    add_files("src/storage/*.cpp")
+    add_files("src/app/*.h")
+    add_files("src/library/*.h")
+    add_files("src/document/*.h")
+    add_files("src/pdf/*.h")
+    add_files("src/reader/*.h")
+    add_files("src/annotation/*.h")
+    add_files("src/note/*.h")
+    add_files("src/settings/*.h")
+    add_files("src/storage/*.h")
+    add_frameworks("QtWidgets", "QtPdf", "QtSvg")
+    add_includedirs("src")
+    set_encodings("utf-8")
+    if qt_prefix then
+        add_rpathdirs(path.join(qt_prefix, "lib"))
+    end

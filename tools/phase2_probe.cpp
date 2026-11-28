@@ -12,6 +12,7 @@
 #include <QPdfSearchModel>
 #include <QTabBar>
 #include <QTabWidget>
+#include <QToolButton>
 #include <QTimer>
 
 #include <cstdio>
@@ -200,11 +201,13 @@ int main(int argc, char **argv)
               "bookmark tab shows saved bookmark");
         }
 
-        view->navigateTo(0, QPointF(), pano::PdfView::NavigationAlignment::PageTop,
+        view->navigateTo(qMin(2, view->pageCount() - 1), QPointF(),
+                         pano::PdfView::NavigationAlignment::PageTop,
                          pano::PdfView::NavigationReason::PageInput);
+        const int erasePage = view->currentPage();
         pano::Annotation firstErase;
         firstErase.id = pano::newAnnotationId();
-        firstErase.pageIndex = 0;
+        firstErase.pageIndex = erasePage;
         firstErase.type = pano::AnnotationType::Rectangle;
         firstErase.rect = QRectF(80, 200, 40, 40);
         view->undoStack()->push(new pano::AddAnnotationCommand(view->annotations(), firstErase));
@@ -215,8 +218,8 @@ int main(int argc, char **argv)
         const int beforeErase = view->annotations()->annotations().size();
         view->setTool(pano::PdfView::Tool::Eraser);
         auto *viewport = view->viewport();
-        const QPoint p1 = viewPosition(view, 0, QPointF(100, 220));
-        const QPoint p2 = viewPosition(view, 0, QPointF(150, 220));
+        const QPoint p1 = viewPosition(view, erasePage, QPointF(100, 220));
+        const QPoint p2 = viewPosition(view, erasePage, QPointF(150, 220));
         sendMouse(viewport, QEvent::MouseButtonPress, p1, Qt::LeftButton, Qt::LeftButton);
         sendMouse(viewport, QEvent::MouseMove, p2, Qt::NoButton, Qt::LeftButton);
         sendMouse(viewport, QEvent::MouseButtonRelease, p2, Qt::LeftButton, Qt::NoButton);
@@ -227,6 +230,15 @@ int main(int argc, char **argv)
               "one eraser gesture is one undo step");
         view->setTool(pano::PdfView::Tool::Select);
 
+        if (auto *pageEdit = window->findChild<QLineEdit *>(QStringLiteral("readerPageEdit"))) {
+            pageEdit->setText(QStringLiteral("1"));
+            QMetaObject::invokeMethod(pageEdit, "returnPressed");
+            QCoreApplication::processEvents();
+            check(view->currentPage() == 0, "page input navigates");
+        }
+
+        view->setLayoutMode(pano::PageLayoutMode::ContinuousSingle);
+        session->workspace()->clearNavigationHistory();
         view->navigateTo(1, QPointF(), pano::PdfView::NavigationAlignment::PageTop,
                          pano::PdfView::NavigationReason::PageInput);
         view->navigateTo(2, QPointF(), pano::PdfView::NavigationAlignment::PageTop,
@@ -247,6 +259,19 @@ int main(int argc, char **argv)
         waitFor(120);
         window->grab().save(QStringLiteral("build/probe/phase2-bookmarks.png"));
 
+        for (QTabWidget *tabs : window->findChildren<QTabWidget *>()) {
+            for (int i = 0; i < tabs->count(); ++i) {
+                if (tabs->tabText(i) == QStringLiteral("页面")) {
+                    tabs->setCurrentIndex(i);
+                    break;
+                }
+            }
+        }
+        waitFor(700);
+        window->grab().save(QStringLiteral("build/probe/phase2-thumbnails.png"));
+
+        view->setLayoutMode(pano::PageLayoutMode::FacingPages);
+        view->setFirstPageAlone(false);
         check(session->saveNow(&error), "session save");
         QFile readingFile(libraryPath + QStringLiteral("/state/reading.json"));
         if (readingFile.open(QIODevice::ReadOnly)) {
@@ -270,9 +295,12 @@ int main(int argc, char **argv)
         check(window->isFullScreen() && !window->findChild<QTabWidget *>()->tabBar()->isVisible(),
               "fullscreen hides tab bar");
         window->grab().save(QStringLiteral("build/probe/phase2-fullscreen.png"));
-        QMetaObject::invokeMethod(window, "toggleFullscreen");
-        waitFor(100);
-        check(!window->isFullScreen(), "fullscreen restored");
+        auto *exitButton = window->findChild<QToolButton *>(QStringLiteral("readerExitFullscreen"));
+        check(exitButton && exitButton->isVisible(), "fullscreen exit button visible");
+        if (exitButton)
+            exitButton->click();
+        waitFor(150);
+        check(!window->isFullScreen(), "fullscreen exit button restores window");
     }
 
     std::printf("%s (%d failures)\n", failures == 0 ? "phase2 probe passed" : "phase2 probe failed",

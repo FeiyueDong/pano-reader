@@ -69,7 +69,7 @@ void SettingsManager::load()
                 root.value(QStringLiteral("first_page_alone")).toBool(true);
             m_settings.pageGap = qBound(8, root.value(QStringLiteral("page_gap")).toInt(16), 64);
             m_settings.wheelTurnsPage =
-                root.value(QStringLiteral("wheel_turns_page")).toBool(false);
+                root.value(QStringLiteral("wheel_turns_page")).toBool(true);
         }
     }
 
@@ -93,7 +93,7 @@ void SettingsManager::load()
             m_settings.readerRightVisible =
                 root.value(QStringLiteral("reader_right_visible")).toBool(true);
             m_settings.readerLeftWidth =
-                qBound(340, root.value(QStringLiteral("reader_left_width")).toInt(360), 560);
+                qBound(160, root.value(QStringLiteral("reader_left_width")).toInt(240), 420);
             m_settings.readerRightWidth =
                 qBound(260, root.value(QStringLiteral("reader_right_width")).toInt(340), 560);
             m_settings.lastOpenBooks.clear();

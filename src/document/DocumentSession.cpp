@@ -6,6 +6,7 @@
 #include <QtGlobal>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QElapsedTimer>
 #include <QJsonObject>
 #include <QSaveFile>
 #include <QTimer>
@@ -115,14 +116,27 @@ bool DocumentSession::load(QString *errorMessage)
         }
         return false;
     }
+    const bool timing = qEnvironmentVariableIsSet("PANO_OPEN_TIMING");
+    QElapsedTimer sourceTimer;
+    if (timing)
+        sourceTimer.start();
     if (!m_manager->verifySource(m_book.id, errorMessage))
         return false;
+    if (timing)
+        qInfo().noquote() << QStringLiteral("[PANO_TIMING] source verified sha256 ms=%1")
+                                 .arg(sourceTimer.elapsed());
 
+    QElapsedTimer timer;
+    if (timing)
+        timer.start();
     m_loading = true;
     if (!view()->openFile(m_book.pdfPath, errorMessage)) {
         m_loading = false;
         return false;
     }
+    if (timing)
+        qInfo().noquote() << QStringLiteral("[PANO_TIMING] pdf opened ms=%1 pages=%2")
+                                 .arg(timer.elapsed()).arg(view()->pageCount());
 
     QJsonArray annotations;
     if (!m_manager->store()->readAnnotations(m_book.directory, m_book.id, &annotations, errorMessage)) {
@@ -132,6 +146,9 @@ bool DocumentSession::load(QString *errorMessage)
     }
 
     m_annotationsFingerprint = annotationsFingerprint();
+    if (timing)
+        qInfo().noquote() << QStringLiteral("[PANO_TIMING] annotations loaded count=%1 ms=%2")
+                                 .arg(annotations.size()).arg(timer.elapsed());
     QString bookmarkError;
     if (!m_bookmarkStore.load(bookDirectory(), m_book.id, &bookmarkError)) {
         emit statusMessage(bookmarkError);
@@ -177,6 +194,9 @@ bool DocumentSession::load(QString *errorMessage)
     if (m_settings)
         view()->setWheelTurnsPage(m_settings->settings().wheelTurnsPage);
 
+    if (timing)
+        qInfo().noquote() << QStringLiteral("[PANO_TIMING] session data loaded ms=%1")
+                                 .arg(timer.elapsed());
     const ReadingState state = m_manager->readingState(m_book.id);
     if (state.valid) {
         PageLayoutMode layoutMode = PageLayoutMode::ContinuousSingle;
