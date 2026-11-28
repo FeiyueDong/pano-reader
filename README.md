@@ -74,12 +74,13 @@ Phase 0 的 PDF Demo 和 Phase 3.0 Markdown Demo 归档在 [`demo/`](demo/)，�
 
 ## 环境
 
-- C++20 编译器（在 Arch Linux / GCC 16 上验证）
-- Qt 6.6 或更新的 Qt Widgets、Qt PDF、Qt SVG（图标着色）
+- C++20 编译器（Arch Linux / GCC 16 上长期验证；Windows 上使用 MSVC）
+- Qt 6.6 或更新的 Qt Widgets、Qt PDF、Qt SVG（图标着色）、Qt Xml（JKQTCommon 依赖）
 - xmake 3.x
 - MD4C 0.6 与 JKQTMathText（正式程序笔记预览依赖；见
   [`docs/THIRD_PARTY_NOTICES.md`](docs/THIRD_PARTY_NOTICES.md)）
-- Linux 或 Windows 桌面环境；当前只在 Linux 上实际构建和运行
+- Linux 或 Windows 桌面环境；Linux 上 MD4C/JKQT 来自发行版包，Windows 上 MD4C 由
+  xmake 包管理器下载，JKQT 需要用仓库脚本以 MSVC 构建一次
 
 本项目使用 Qt 6 SDK 的 `QtWidgets` 与 `QtPdf`。系统 Qt 的 PDF 版本不一致时，请显式
 指定 Qt SDK 前缀。
@@ -105,11 +106,34 @@ demo/markdown/tools/fetch-deps.sh
 
 该脚本只准备本地依赖，不参与默认构建；缺少依赖时构建会明确失败。
 
+Windows 上没有对应的发行版包，JKQT 需要用 MSVC 构建一次。仓库脚本会下载固定版本的
+JKQtPlotter，只编译项目需要的 `JKQTCommon` 与 `JKQTMathText` 静态库，并安装到
+`build\deps\jkqt\usr`：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\fetch-jkqt-windows.ps1
+```
+
+脚本从 `.xmake\windows\x64\xmake.conf` 读取 `--qt` 配置（也可用 `-QtDir` 显式指定），
+`-Force` 强制重新下载与构建。两个库名在 Linux 与 Windows 上一致（都带 `_RelWithDebInfo`
+后缀），因此 xmake 目标共用同一套链接名。MD4C 在 Windows 由 xmake 包管理器自动下载
+安装（根 `xmake.lua` 的 `add_requires("md4c")`），不需要手工准备。
+
 `--qt` 必须指向包含 `QtWidgets`、`QtPdf` 的 Qt 6 SDK 前缀；如果系统 Qt 的 PDF
 部件版本不一致，自动探测可能选错 SDK，因此建议显式传入。
 
 可执行文件位于 `build/linux/x86_64/debug/pano-reader`（Linux）。发布构建把
 `-m debug` 换成 `-m release`。
+
+Windows 上的配置与构建（PowerShell，先执行过上面的 JKQT 脚本）：
+
+```powershell
+xmake f -c -p windows -a x64 -m release --qt=C:\Qt\6.x.y\msvc2022_64 `
+  --build_tests=n --build_tools=n --build_demo=n --build_markdown_demo=n
+xmake -j4
+```
+
+可执行文件位于 `build\windows\x64\release\pano-reader.exe`。
 
 ### 可选测试、诊断与 Demo
 

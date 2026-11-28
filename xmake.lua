@@ -40,6 +40,8 @@ function pano_qt_prefix()
     return qt_prefix
 end
 
+add_requires("md4c")
+
 includes("src/xmake.lua")
 
 if has_config("build_tests") then

@@ -8,7 +8,7 @@ local function finish(name, widget)
     if widget then
         add_rules("qt.widgetapp")
         add_files(path.join(os.projectdir(), "resources", "resources.qrc"))
-        add_frameworks("QtCore", "QtGui", "QtWidgets", "QtPdf", "QtSvg")
+        add_frameworks("QtCore", "QtGui", "QtWidgets", "QtPdf", "QtSvg", "QtXml")
     else
         add_rules("qt.console")
         add_frameworks("QtCore", "QtGui")
@@ -51,7 +51,7 @@ for _, name in ipairs({"phase1", "phase2", "interaction", "note", "theme"}) do
     add_rules("qt.widgetapp")
     add_files(path.join(tests, name .. "_probe.cpp"))
     add_files(path.join(os.projectdir(), "resources", "resources.qrc"))
-    add_frameworks("QtCore", "QtGui", "QtWidgets", "QtPdf", "QtSvg")
+    add_frameworks("QtCore", "QtGui", "QtWidgets", "QtPdf", "QtSvg", "QtXml")
     add_deps("pano-app")
     add_includedirs(project_src)
     add_defines('PANO_SAMPLE_PDF="' .. sample .. '"')
