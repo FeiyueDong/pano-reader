@@ -2,6 +2,11 @@ local src = os.scriptdir()
 local project_src = path.join(os.projectdir(), "src")
 local qt_prefix = get_config("qt") or os.getenv("PANO_QT_PREFIX")
 local jkqt_root = os.getenv("JKQT_ROOT") or path.join(os.projectdir(), "build/deps/jkqt/usr")
+-- JKQTMathText / JKQTCommon 的库名。Linux 用发行版包（Arch: jkqtplotter），Windows 用
+-- scripts/fetch-jkqt-windows.ps1 构建，两边都打开 JKQtPlotter_BUILD_DECORATE_LIBNAMES_WITH_BUILDTYPE，
+-- 因此都带 _RelWithDebInfo 后缀。若要换成别的构建类型或重命名库，用环境变量覆盖。
+local jkqt_math_lib = os.getenv("JKQT_MATHTEXT_LIB") or "JKQTMathText6_RelWithDebInfo"
+local jkqt_common_lib = os.getenv("JKQT_COMMON_LIB") or "JKQTCommon6_RelWithDebInfo"
 
 local function common_target(name)
     add_rpathdirs()
@@ -39,10 +44,13 @@ target("pano-note")
     add_files(path.join(src, "note/*.h"))
     add_frameworks("QtCore", "QtGui", "QtWidgets")
     add_deps("pano-common")
+    -- note/MarkdownRenderer.cpp 直接包含 <md4c-html.h>，包必须加在编译它的目标上，
+    -- 依赖它的可执行目标加 add_packages 不会把包含目录传给静态库。
+    add_packages("md4c")
     add_includedirs(project_src)
     add_includedirs(path.join(jkqt_root, "include"))
     add_linkdirs(path.join(jkqt_root, "lib"))
-    add_links("JKQTMathText6_RelWithDebInfo", "JKQTCommon6_RelWithDebInfo",
+    add_links(jkqt_math_lib, jkqt_common_lib,
               "md4c-html", "md4c")
     if qt_prefix then
         add_rpathdirs(path.join(qt_prefix, "lib"))
@@ -89,7 +97,9 @@ target("pano-reader")
     add_files(path.join(src, "main.cpp"))
     add_files(path.join(src, "..", "resources", "resources.qrc"))
     add_deps("pano-app")
-    add_frameworks("QtCore", "QtGui", "QtWidgets", "QtPdf", "QtSvg")
+    add_packages("md4c")
+    -- JKQTCommon 静态库自身链接 Qt6::Xml，最终可执行文件必须显式带上 QtXml。
+    add_frameworks("QtCore", "QtGui", "QtWidgets", "QtPdf", "QtSvg", "QtXml")
     add_includedirs(project_src)
     set_encodings("utf-8")
     if qt_prefix then
