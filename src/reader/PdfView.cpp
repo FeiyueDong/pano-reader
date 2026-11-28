@@ -661,7 +661,7 @@ void PdfView::navigatePageStep(int direction, bool history)
     } else {
         const int previous = (spread.isEmpty() ? current : spread.first()) - 1;
         if (previous >= 0)
-            navigateTo(previous, QPointF(), NavigationAlignment::PageTop, reason);
+            navigateTo(previous, QPointF(), NavigationAlignment::PageBottom, reason);
     }
 }
 
@@ -2196,7 +2196,7 @@ bool PdfView::handleEscape()
         cancelErase();
         return true;
     }
-    if (m_dragMode != DragMode::None || m_draft.pageIndex >= 0) {
+    if (m_dragMode != DragMode::None) {
         m_dragMode = DragMode::None;
         m_draft = Annotation();
         m_editId.clear();

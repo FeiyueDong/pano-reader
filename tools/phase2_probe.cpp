@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QKeyEvent>
 #include <QJsonObject>
 #include <QLineEdit>
 #include <QLabel>
@@ -206,6 +207,24 @@ int main(int argc, char **argv)
         sendWheel(120);
         waitFor(30);
         check(view->currentPage() == 1, "reverse wheel turns previous page");
+
+        view->setLayoutMode(pano::PageLayoutMode::FacingPages);
+        view->setFirstPageAlone(false);
+        view->goToPage(0);
+        view->fitPage();
+        waitFor(80);
+        view->verticalScrollBar()->setValue(view->verticalScrollBar()->maximum());
+        sendWheel(-120);
+        waitFor(60);
+        check(view->currentPage() != 0, "facing wheel turns one spread");
+        check(view->layout().spreadPages(view->currentPage()).first() == 2,
+              "facing wheel lands on last page group");
+        waitFor(280);
+        sendWheel(120);
+        waitFor(60);
+        const QVector<int> previousSpread = view->layout().spreadPages(view->currentPage());
+        check(!previousSpread.isEmpty() && previousSpread.first() == 0,
+              "facing reverse wheel returns previous spread");
         view->setLayoutMode(pano::PageLayoutMode::ContinuousSingle);
         view->goToPage(0);
 
@@ -368,6 +387,11 @@ int main(int argc, char **argv)
         if (!view->annotations()->annotations().isEmpty())
             view->selectAnnotation(view->annotations()->annotations().first().id);
         waitFor(120);
+        view->setTool(pano::PdfView::Tool::Rectangle);
+        QKeyEvent normalEscape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QApplication::sendEvent(window, &normalEscape);
+        waitFor(60);
+        check(view->tool() == pano::PdfView::Tool::Select, "Esc returns to select in normal mode");
         window->grab().save(QStringLiteral("build/probe/phase2-layout.png"));
         window->grab().save(QStringLiteral("build/probe/phase2-context.png"));
         QMetaObject::invokeMethod(window, "toggleFullscreen");
@@ -381,6 +405,25 @@ int main(int argc, char **argv)
             exitButton->click();
         waitFor(150);
         check(!window->isFullScreen(), "fullscreen exit button restores window");
+
+        QMetaObject::invokeMethod(window, "toggleFullscreen");
+        waitFor(100);
+        view->setTool(pano::PdfView::Tool::Select);
+        QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QApplication::sendEvent(window, &escape);
+        waitFor(120);
+        check(!window->isFullScreen(), "Esc exits idle fullscreen");
+
+        QMetaObject::invokeMethod(window, "toggleFullscreen");
+        waitFor(100);
+        view->setTool(pano::PdfView::Tool::Rectangle);
+        QApplication::sendEvent(window, &escape);
+        waitFor(60);
+        check(view->tool() == pano::PdfView::Tool::Select, "Esc returns to select tool");
+        check(window->isFullScreen(), "first Esc keeps fullscreen after tool reset");
+        QApplication::sendEvent(window, &escape);
+        waitFor(120);
+        check(!window->isFullScreen(), "second Esc exits fullscreen");
     }
 
     std::printf("%s (%d failures)\n", failures == 0 ? "phase2 probe passed" : "phase2 probe failed",
