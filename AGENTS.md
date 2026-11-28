@@ -7,9 +7,18 @@
 用户已授权在本机对 PANO 进行构建、运行、截图和真实视觉检查：
 
 ```bash
-xmake f -c -m debug --qt=/home/yue/Qt/6.12.0/gcc_64
+# 默认：正式程序 + 正式探针，不包含任何 Demo
+xmake f -c -m debug --qt=/home/yue/Qt/6.12.0/gcc_64 \
+  --build_demo=n --build_markdown_demo=n
 xmake -j4
 ```
+
+Demo 默认关闭，由两个独立根选项按需包含：
+`--build_demo=y`（Phase 0 PDF Demo，targets `pano-demo-*`）和
+`--build_markdown_demo=y`（Phase 3.0 Markdown Demo，target `pano-markdown-demo`）。
+局部 `demo/*/xmake.lua` 不是独立构建入口；修改 xmake 组织前后先用
+`xmake f -c` 清理配置，必要时删除 `build/.deps`、`build/.gens`、`build/.objs`、
+`build/.build_cache`，避免旧 target 缓存残留。
 
 - 更改 Qt/C++ 代码后至少运行一次 `xmake -j4`；涉及数据层时运行
   `pano-library-probe`；涉及阅读器坐标时运行 `pano-coordinate-probe`；涉及文字选区
@@ -17,14 +26,15 @@ xmake -j4
 - 视觉检查使用真实运行或离屏探针生成的截图；不要把“编译通过”当作视觉验收。
 - 探针是稀疏检查，不替代人工 GUI 测试。添加探针时优先覆盖数据安全、格式契约、
   坐标变换和持久化闭环，避免为每个控件写脆弱的 UI 测试。
-- 修改 `demo/` 时注意它是 Phase 0 归档，拥有独立 `demo/xmake.lua`；根工程不链接
-  Demo 代码。
+- 修改 `demo/` 时注意它是归档代码，由根工程按选项包含；根正式 target 不链接
+  Demo 源码，Markdown Demo 的 MD4C/JKQT 依赖默认不探测。
 
 ## 数据安全（最高优先级）
 
 - 源 PDF 始终只读；不修改、不覆盖、不把标注写回 PDF。
 - 用户书库是真实数据：测试使用 `/tmp` 或 `build/probe/` 下的临时书库，不在仓库内
-  或用户书库中写入测试数据。
+  或用户书库中写入测试数据。Phase 3.1 起新版笔记协议不兼容旧数据，禁止直接在
+  `~/Documents/pano` 写入新格式；使用临时书库或经确认的新测试书库。
 - 不自动迁移或重写旧 Demo `.pano` 数据；不静默修复格式错误。
 - 写入 JSON 使用 `QSaveFile`；书库索引写入必须经过外部修改检查。
 - 遇到哈希不一致、锁冲突、未知 `schema_version`、缺失清单时拒绝并提示，不能猜测。
@@ -57,3 +67,12 @@ xmake -j4
   `phase2-thumbnails.png`、`phase2-search.png`、`phase2-fullscreen.png`。
 - `pano-pdf-timing` 用于大 PDF 打开/首屏测量，例如
   `./build/linux/x86_64/debug/pano-pdf-timing "/path/to/book.pdf"`。
+
+## Phase 3.1 笔记模型
+
+- `annotations.json` 为 `schema_version: 2`，同时保存 `annotations`、`notes`、`note_tree`。
+  旧 schema 1 必须拒绝读取并保持文件不变，不做自动迁移。
+- 涉及笔记模型、笔记树、关联、撤销或书库统计时运行 `pano-note-probe`；涉及阅读器/标注
+  回归时同时运行 Phase 1/2 探针。
+- 新版笔记协议不兼容 `~/Documents/pano` 中已有旧数据；不要直接向用户书库写入新格式。
+  测试使用临时书库或经确认的新测试书库，旧格式拒绝测试使用临时副本。

@@ -43,10 +43,12 @@ public:
     bool writeDocument(const QString &bookDirectory, const BookDocument &document,
                        QString *errorMessage);
 
-    bool readAnnotations(const QString &bookDirectory, const QString &bookId,
-                         QJsonArray *annotations, QString *errorMessage) const;
-    bool writeAnnotations(const QString &bookDirectory, const QString &bookId,
-                          const QJsonArray &annotations, QString *errorMessage);
+    bool readReadingData(const QString &bookDirectory, const QString &bookId,
+                         QJsonArray *annotations, QJsonArray *notes, QJsonArray *noteTree,
+                         QString *errorMessage) const;
+    bool writeReadingData(const QString &bookDirectory, const QString &bookId,
+                          const QJsonArray &annotations, const QJsonArray &notes,
+                          const QJsonArray &noteTree, QString *errorMessage);
 
     QString absoluteBookDirectory(const QString &bookDirectory) const;
     bool isManagedBookDirectory(const QString &absolutePath) const;

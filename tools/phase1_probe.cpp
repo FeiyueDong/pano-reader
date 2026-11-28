@@ -105,6 +105,7 @@ int main(int argc, char **argv)
     check(view && view->pageCount() == 3, "page count 3");
 
     if (view) {
+        auto *session = window->findChild<pano::DocumentSession *>();
         pano::Annotation annotation;
         annotation.id = pano::newAnnotationId();
         annotation.pageIndex = 0;
@@ -115,10 +116,15 @@ int main(int argc, char **argv)
         annotation.rect = QRectF(80, 120, 300, 90);
         view->undoStack()->push(new pano::AddAnnotationCommand(view->annotations(), annotation));
         view->selectAnnotation(annotation.id);
-        pano::AnnotationNote note;
+        pano::Note note;
+        note.id = pano::newNoteId();
         note.title = QStringLiteral("测试笔记");
         note.markdown = QStringLiteral("## 测试笔记\n\n这是 Phase 1 UI 探针写入的笔记。\n\n$x^2+y^2=1$");
-        view->setAnnotationNote(annotation.id, note);
+        note.annotationId = annotation.id;
+        QString noteError;
+        QString noteId;
+        check(session && session->createNote(note, QString(), &noteId, &noteError),
+              "note created");
         view->goToPage(1);
         waitFor(300);
         check(view->currentPage() == 1, "precise page navigation");
@@ -137,7 +143,7 @@ int main(int argc, char **argv)
 
         // External modification protection: touch annotations.json after the
         // session loaded it, try to save, and verify the file is not overwritten.
-        if (auto *session = window->findChild<pano::DocumentSession *>()) {
+        if (session) {
             const QString annotationsPath =
                 QDir(libraryPath).filePath(book.directory + QStringLiteral("/annotations.json"));
             QFile file(annotationsPath);
@@ -149,9 +155,11 @@ int main(int argc, char **argv)
             if (!original.isEmpty() && file.open(QIODevice::Append)) {
                 file.write("\n");
                 file.close();
-                pano::AnnotationNote changed = note;
+                pano::Note changed = note;
+                changed.id = noteId;
                 changed.markdown += QStringLiteral("\n\n外部修改测试");
-                view->setAnnotationNote(annotation.id, changed);
+                QString updateError;
+                check(session->updateNote(changed, &updateError), "note updated");
                 // The application normally shows a modal warning for this
                 // failure; the probe disconnects it to stay non-interactive.
                 QObject::disconnect(session, &pano::DocumentSession::saveFailed,

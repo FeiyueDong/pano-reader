@@ -1,6 +1,7 @@
 #include "app/ReaderWorkspace.h"
 
 #include <QAction>
+#include <functional>
 #include <QActionGroup>
 #include <QApplication>
 #include <algorithm>
@@ -49,14 +50,17 @@
 #include <QToolBar>
 #include <QToolButton>
 #include <QTreeView>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 #include <QVBoxLayout>
 
 #include "annotation/AnnotationRenderer.h"
 #include "app/IconManager.h"
-#include "app/NotePanel.h"
+#include "app/NoteEditDialog.h"
 #include "app/RegionCaptureOverlay.h"
 #include "document/BookmarkStore.h"
 #include "document/DocumentSession.h"
+#include "note/MarkdownPreview.h"
 #include "pdf/PageRenderer.h"
 #include "reader/PageLayout.h"
 #include "reader/PdfView.h"
@@ -70,8 +74,6 @@ namespace {
 QString annotationExcerpt(const Annotation &annotation, int maxLength = 42)
 {
     QString text = annotation.text.simplified();
-    if (text.isEmpty() && !annotation.note.title.isEmpty())
-        text = annotation.note.title;
     if (text.size() > maxLength)
         text = text.left(maxLength - 1) + QChar(0x2026);
     return text;
@@ -113,7 +115,10 @@ ReaderWorkspace::ReaderWorkspace(DocumentSession *session, QWidget *parent)
     , m_session(session)
 {
     m_view = new PdfView(this);
-    m_notePanel = new NotePanel(this);
+    m_view->setNoteQuery([this](const QString &annotationId) {
+        return m_session && m_session->hasLinkedNote(annotationId);
+    });
+    m_noteDialog = nullptr;
     m_thumbRenderer = new PageRenderer(this);
     m_captureOverlay = new RegionCaptureOverlay(m_view->viewport());
     m_captureOverlay->hide();
@@ -132,25 +137,6 @@ ReaderWorkspace::ReaderWorkspace(DocumentSession *session, QWidget *parent)
             if (!presets->save(&error) && !error.isEmpty())
                 showStatus(error);
         }
-    });
-
-    m_noteTimer = new QTimer(this);
-    m_noteTimer->setSingleShot(true);
-    m_noteTimer->setInterval(2000);
-    connect(m_noteTimer, &QTimer::timeout, this, [this] {
-        commitPendingNote();
-        m_noteDirty = false;
-        m_noteMaxTimer->stop();
-        m_noteMaxStarted = false;
-    });
-
-    m_noteMaxTimer = new QTimer(this);
-    m_noteMaxTimer->setSingleShot(true);
-    m_noteMaxTimer->setInterval(30000);
-    connect(m_noteMaxTimer, &QTimer::timeout, this, [this] {
-        commitPendingNote();
-        m_noteDirty = false;
-        m_noteMaxStarted = false;
     });
 
     m_panelSaveTimer = new QTimer(this);
@@ -226,15 +212,6 @@ ReaderWorkspace::ReaderWorkspace(DocumentSession *session, QWidget *parent)
     connect(m_view, &PdfView::pageChanged, this, &ReaderWorkspace::updateFloatingToolBars);
     connect(m_view, &PdfView::rotationChanged, this, &ReaderWorkspace::updateFloatingToolBars);
 
-    connect(m_notePanel, &NotePanel::editRequested, this, &ReaderWorkspace::beginNoteEdit);
-    connect(m_notePanel, &NotePanel::commitRequested, this, &ReaderWorkspace::commitNoteEdit);
-    connect(m_notePanel, &NotePanel::cancelRequested, this, &ReaderWorkspace::cancelNoteEdit);
-    connect(m_notePanel, &NotePanel::imageRequested, this,
-            &ReaderWorkspace::insertImageIntoNote);
-    connect(m_notePanel, &NotePanel::captureRequested, this,
-            &ReaderWorkspace::startRegionCapture);
-    connect(m_notePanel, &NotePanel::contentChanged, this, &ReaderWorkspace::markNoteDirty);
-
     connect(m_captureOverlay, &RegionCaptureOverlay::regionSelected, this,
             &ReaderWorkspace::finishCapture);
     connect(m_captureOverlay, &RegionCaptureOverlay::cancelled, this, [this] {
@@ -283,14 +260,16 @@ ReaderWorkspace::ReaderWorkspace(DocumentSession *session, QWidget *parent)
 
 ReaderWorkspace::~ReaderWorkspace()
 {
-    stopNoteTimers();
     blockSignals(true);
     if (m_view) {
         m_view->blockSignals(true);
         disconnect(m_view, nullptr, this, nullptr);
     }
-    if (m_notePanel)
-        disconnect(m_notePanel, nullptr, this, nullptr);
+    if (m_noteDialog) {
+        disconnect(m_noteDialog, nullptr, this, nullptr);
+        m_noteDialog->deleteLater();
+        m_noteDialog = nullptr;
+    }
     if (m_session)
         disconnect(m_session, nullptr, this, nullptr);
 }
@@ -526,7 +505,8 @@ void ReaderWorkspace::applyRegionFloatingAction(int action)
     if (action == 4) {
         onNoteRequested(id);
         if (!imageRelative.isEmpty())
-            m_notePanel->insertMarkdown(QStringLiteral("![区域截图](%1)\n").arg(imageRelative));
+            if (m_noteDialog)
+                m_noteDialog->insertMarkdown(QStringLiteral("![区域截图](%1)\n").arg(imageRelative));
     } else {
         showStatus(action == 3 ? tr("已创建区域高亮") : tr("已创建矩形标注"));
     }
@@ -1013,7 +993,7 @@ QWidget *ReaderWorkspace::buildRightDock()
     m_rightTabs->setDocumentMode(true);
     m_rightTabs->addTab(buildAnnotationTab(),
                         IconManager::instance()->icon(QStringLiteral("list")), tr("标注"));
-    m_rightTabs->addTab(m_notePanel,
+    m_rightTabs->addTab(buildNoteTab(),
                         IconManager::instance()->icon(QStringLiteral("sticky-note")), tr("笔记"));
 
     auto *detailScroll = new QScrollArea(m_rightTabs);
@@ -1107,6 +1087,144 @@ QWidget *ReaderWorkspace::buildAnnotationTab()
     return page;
 }
 
+QWidget *ReaderWorkspace::buildNoteTab()
+{
+    auto *page = new QWidget(m_rightTabs);
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(6, 6, 6, 6);
+    layout->setSpacing(6);
+
+    auto *bar = new QHBoxLayout;
+    bar->setContentsMargins(0, 0, 0, 0);
+    auto makeButton = [&](const QString &icon, const QString &tooltip, const QString &text = QString()) {
+        auto *button = new QToolButton(page);
+        button->setIcon(IconManager::instance()->icon(icon, 18));
+        button->setToolTip(tooltip);
+        button->setAutoRaise(true);
+        if (!text.isEmpty())
+            button->setText(text);
+        bar->addWidget(button);
+        return button;
+    };
+    auto *newNoteButton = makeButton(QStringLiteral("file-plus"), tr("新建笔记"));
+    auto *newGroupButton = makeButton(QStringLiteral("folder-plus"), tr("新建分组"));
+    auto *renameButton = makeButton(QStringLiteral("pen-line"), tr("重命名"));
+    auto *moveButton = makeButton(QStringLiteral("external-link"), tr("移动到…"));
+    auto *upButton = makeButton(QStringLiteral("chevron-right"), tr("上移"));
+    upButton->setText(QStringLiteral("↑"));
+    auto *downButton = makeButton(QStringLiteral("chevron-right"), tr("下移"));
+    downButton->setText(QStringLiteral("↓"));
+    auto *deleteButton = makeButton(QStringLiteral("trash-2"), tr("删除"));
+    auto *linkButton = makeButton(QStringLiteral("external-link"), tr("关联/解除关联所选标注"));
+    auto *locateButton = makeButton(QStringLiteral("scan"), tr("定位关联页"));
+    bar->addStretch(1);
+    layout->addLayout(bar);
+
+    m_noteTreeWidget = new QTreeWidget(page);
+    m_noteTreeWidget->setHeaderHidden(true);
+    m_noteTreeWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_noteTreeWidget->setMinimumHeight(120);
+    layout->addWidget(m_noteTreeWidget, 1);
+
+    m_noteInfoLabel = new QLabel(page);
+    m_noteInfoLabel->setWordWrap(true);
+    m_noteInfoLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(m_noteInfoLabel);
+
+    m_notePreview = new MarkdownPreview(page);
+    m_notePreview->setMinimumHeight(100);
+    layout->addWidget(m_notePreview, 1);
+
+    connect(newNoteButton, &QToolButton::clicked, this, [this] {
+        createIndependentNote(selectedParentGroupId());
+    });
+    connect(newGroupButton, &QToolButton::clicked, this, [this] {
+        createGroupUnder(selectedParentGroupId());
+    });
+    connect(renameButton, &QToolButton::clicked, this,
+            &ReaderWorkspace::renameSelectedNoteNode);
+    connect(moveButton, &QToolButton::clicked, this,
+            &ReaderWorkspace::moveSelectedNoteNode);
+    connect(upButton, &QToolButton::clicked, this, [this] {
+        const QString nodeId = selectedNoteNodeId();
+        if (nodeId.isEmpty() || !m_session)
+            return;
+        QString error;
+        if (!m_session->moveTreeNodeUp(nodeId, &error))
+            showStatus(error);
+        refreshNoteTree();
+    });
+    connect(downButton, &QToolButton::clicked, this, [this] {
+        const QString nodeId = selectedNoteNodeId();
+        if (nodeId.isEmpty() || !m_session)
+            return;
+        QString error;
+        if (!m_session->moveTreeNodeDown(nodeId, &error))
+            showStatus(error);
+        refreshNoteTree();
+    });
+    connect(deleteButton, &QToolButton::clicked, this,
+            &ReaderWorkspace::deleteSelectedNoteNode);
+    connect(linkButton, &QToolButton::clicked, this, [this] {
+        if (!m_session)
+            return;
+        const QString nodeId = selectedNoteNodeId();
+        const NoteTreeNode *node = m_session->noteTree().findNode(nodeId);
+        if (!node || node->type != NoteNodeType::Note)
+            return;
+        const Note *note = m_session->note(node->noteId);
+        if (!note)
+            return;
+        QString error;
+        if (!note->annotationId.isEmpty()) {
+            const Annotation *linked = m_session->view()->annotations()->find(note->annotationId);
+            if (linked && linked->type == AnnotationType::NotePoint) {
+                if (m_session->deleteAnnotationKeepingNote(linked->id, &error))
+                    m_view->selectAnnotation(QString());
+                else
+                    showStatus(error);
+            } else if (!m_session->unlinkNote(note->id, &error)) {
+                showStatus(error);
+            }
+        } else if (const Annotation *annotation = currentAnnotation()) {
+            if (!m_session->linkNoteToAnnotation(note->id, annotation->id, &error))
+                showStatus(error);
+        } else {
+            showStatus(tr("请先在页面上选择一个标注，再关联笔记。"));
+        }
+        refreshReadingData();
+    });
+    connect(locateButton, &QToolButton::clicked, this, [this] {
+        const QString nodeId = selectedNoteNodeId();
+        if (!m_session || nodeId.isEmpty())
+            return;
+        const NoteTreeNode *node = m_session->noteTree().findNode(nodeId);
+        if (!node || node->type != NoteNodeType::Note)
+            return;
+        const Note *note = m_session->note(node->noteId);
+        if (!note || note->annotationId.isEmpty())
+            return;
+        m_view->revealAnnotation(note->annotationId);
+    });
+    connect(m_noteTreeWidget, &QTreeWidget::itemClicked, this,
+            [this](QTreeWidgetItem *, int) { updateNotePreview(); });
+    connect(m_noteTreeWidget, &QTreeWidget::itemDoubleClicked, this,
+            [this](QTreeWidgetItem *item, int) {
+                if (!item)
+                    return;
+                const QString nodeId = item->data(0, Qt::UserRole).toString();
+                const NoteTreeNode *node = m_session ? m_session->noteTree().findNode(nodeId) : nullptr;
+                if (!node || node->type != NoteNodeType::Note)
+                    return;
+                openNoteEditor(node->noteId);
+                if (const Note *note = m_session->note(node->noteId); note && !note->annotationId.isEmpty())
+                    m_view->revealAnnotation(note->annotationId);
+            });
+    connect(m_noteTreeWidget, &QTreeWidget::customContextMenuRequested, this,
+            &ReaderWorkspace::showNoteContextMenu);
+    return page;
+}
+
 QWidget *ReaderWorkspace::buildDetailPane()
 {
     auto *page = new QWidget(this);
@@ -1154,8 +1272,9 @@ void ReaderWorkspace::reloadToolPreset()
 void ReaderWorkspace::refreshAll()
 {
     if (m_session) {
-        m_notePanel->setBaseDirectory(m_session->bookDirectory());
         m_thumbRenderer->setDocument(m_view->document());
+        connect(m_session, &DocumentSession::readingDataChanged, this,
+                &ReaderWorkspace::refreshReadingData, Qt::UniqueConnection);
     }
     refreshOutline();
     refreshThumbnails();
@@ -1173,7 +1292,8 @@ void ReaderWorkspace::refreshAll()
     updateLayoutControls();
     updateBottomStatus();
     updateDetailPanel();
-    updateNotePanel();
+    refreshNoteTree();
+    updateNotePreview();
     updateContextToolBar();
     updatePanelVisibility();
 }
@@ -1409,7 +1529,7 @@ void ReaderWorkspace::refreshAnnotationList()
     for (const Annotation &annotation : annotations) {
         if (!filter.isEmpty() && annotationTypeName(annotation.type) != filter)
             continue;
-        if (noteOnly && annotation.note.isEmpty())
+        if (noteOnly && !(m_session && m_session->hasLinkedNote(annotation.id)))
             continue;
         QListWidgetItem *item = makeAnnotationItem(annotation);
         m_annotationList->addItem(item);
@@ -1436,21 +1556,22 @@ void ReaderWorkspace::refreshAnnotationPreview()
                        .arg(annotation->pageIndex + 1)
                        .arg(annotationTypeDisplayName(annotation->type))
                        .arg(annotationExcerpt(*annotation));
-    if (!annotation->note.markdown.isEmpty())
-        text += QStringLiteral("\n笔记：%1").arg(annotation->note.markdown.left(160));
+    if (m_session) {
+        if (const Note *note = m_session->noteForAnnotation(annotation->id))
+            text += QStringLiteral("\n笔记：%1").arg(note->markdown.left(160));
+    }
     m_annotationPreview->setText(text);
 }
 
 QListWidgetItem *ReaderWorkspace::makeAnnotationItem(const Annotation &annotation) const
 {
-    QString title = annotation.note.title;
-    if (title.isEmpty())
-        title = annotationTypeDisplayName(annotation.type);
+    const Note *note = m_session ? m_session->noteForAnnotation(annotation.id) : nullptr;
+    QString title = note ? note->displayTitle() : annotationTypeDisplayName(annotation.type);
     const QString excerpt = annotationExcerpt(annotation);
     QString text = QStringLiteral("P%1 · %2").arg(annotation.pageIndex + 1).arg(title);
     if (!excerpt.isEmpty())
         text += QStringLiteral("\n%1").arg(excerpt);
-    if (!annotation.note.isEmpty())
+    if (note)
         text += QStringLiteral("  ✎");
 
     auto *item = new QListWidgetItem(text);
@@ -1464,7 +1585,7 @@ QListWidgetItem *ReaderWorkspace::makeAnnotationItem(const Annotation &annotatio
     painter.setBrush(color);
     painter.drawEllipse(1, 1, 12, 12);
     item->setIcon(QIcon(swatch));
-    item->setToolTip(annotation.text.isEmpty() ? annotation.note.markdown : annotation.text);
+    item->setToolTip(note ? note->markdown : annotation.text);
     return item;
 }
 
@@ -1494,23 +1615,20 @@ void ReaderWorkspace::onAnnotationsChanged()
 {
     refreshAnnotationList();
     updateDetailPanel();
-    if (!isEditingNote())
-        updateNotePanel();
+    updateNotePreview();
     updateContextToolBar();
     updateBottomStatus();
 }
 
 void ReaderWorkspace::onSelectionChanged(const QString &annotationId)
 {
+    Q_UNUSED(annotationId);
     if (m_applyingSelection)
         return;
     flushPendingStyle();
-    if (isEditingNote() && m_editingId != annotationId)
-        commitNoteEdit();
-
     refreshAnnotationList();
     updateDetailPanel();
-    updateNotePanel();
+    updateNotePreview();
     updateContextToolBar();
     // Selection is deliberately not navigation.  The annotation list, outline,
     // thumbnails and explicit "reveal" actions call revealAnnotation().
@@ -1524,31 +1642,54 @@ void ReaderWorkspace::onNoteRequested(const QString &annotationId)
         m_applyingSelection = true;
         m_view->selectAnnotation(annotationId);
         m_applyingSelection = false;
+        updateDetailPanel();
     }
-    onSelectionChanged(annotationId);
-    beginNoteEdit();
+    if (m_rightTabs)
+        m_rightTabs->setCurrentIndex(1);
+    if (!m_session->hasLinkedNote(annotationId)) {
+        const Annotation *annotation = m_view->annotations()->find(annotationId);
+        m_pendingNoteAnnotationId = annotationId;
+        m_pendingNoteAnnotationIsNew = annotation && annotation->type == AnnotationType::NotePoint;
+    }
+    openNoteForAnnotation(annotationId);
 }
 
 void ReaderWorkspace::onNoteDeleteRequested(const QString &annotationId)
 {
+    if (!m_session || !m_view)
+        return;
     const Annotation *annotation = m_view->annotations()->find(annotationId);
     if (!annotation)
         return;
-    const QString message = tr("“%1”带有笔记。删除批注会同时删除笔记。\n\n"
-                               "确定删除这个对象吗？")
-                                .arg(annotation->note.title.isEmpty()
-                                         ? annotationTypeDisplayName(annotation->type)
-                                         : annotation->note.title);
-    if (QMessageBox::question(this, tr("删除附带笔记的批注"), message,
-                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
-        != QMessageBox::Yes)
+    const Note *note = m_session->noteForAnnotation(annotationId);
+    QMessageBox box(QMessageBox::Question, tr("删除附带笔记的批注"),
+                    tr("该批注关联了笔记“%1”。删除时如何处理笔记？")
+                        .arg(note ? note->displayTitle() : tr("未命名笔记")),
+                    QMessageBox::NoButton, this);
+    QPushButton *keepButton = box.addButton(tr("删除批注，保留笔记"), QMessageBox::AcceptRole);
+    QPushButton *deleteBothButton = box.addButton(tr("批注和笔记都删除"), QMessageBox::DestructiveRole);
+    box.addButton(QMessageBox::Cancel);
+    box.exec();
+    if (box.clickedButton() != keepButton && box.clickedButton() != deleteBothButton)
         return;
-    if (m_editingId == annotationId) {
-        stopNoteTimers();
-        m_notePanel->endEdit();
-        m_editingId.clear();
+    QString error;
+    if (box.clickedButton() == keepButton) {
+        if (m_session->deleteAnnotationKeepingNote(annotationId, &error))
+            m_view->selectAnnotation(QString());
+        else
+            showStatus(error);
+    } else if (note) {
+        if (!m_session->deleteNote(note->id, true, &error)) {
+            showStatus(error);
+            return;
+        }
+        if (m_view->annotations()->find(annotationId)
+            && !m_session->deleteAnnotationKeepingNote(annotationId, &error))
+            showStatus(error);
+        else
+            m_view->selectAnnotation(QString());
     }
-    m_view->deleteAnnotation(annotationId, true);
+    refreshReadingData();
 }
 
 void ReaderWorkspace::updateDetailPanel()
@@ -1566,9 +1707,9 @@ void ReaderWorkspace::updateDetailPanel()
         m_detailMeta->clear();
         return;
     }
-    m_detailTitle->setText(annotation->note.title.isEmpty()
-                               ? annotationTypeDisplayName(annotation->type)
-                               : annotation->note.title);
+    const Note *note = m_session ? m_session->noteForAnnotation(annotation->id) : nullptr;
+    m_detailTitle->setText(note ? note->displayTitle()
+                                : annotationTypeDisplayName(annotation->type));
     m_detailMeta->setText(tr("%1 · 第 %2 页\n创建：%3\n修改：%4")
                               .arg(annotationTypeDisplayName(annotation->type))
                               .arg(annotation->pageIndex + 1)
@@ -1579,134 +1720,443 @@ void ReaderWorkspace::updateDetailPanel()
 
 void ReaderWorkspace::updateNotePanel()
 {
-    const QString id = m_view->selectedAnnotationId();
-    if (!id.isEmpty() && m_editingId == id) {
-        m_notePanel->setEditable(true);
+    updateNotePreview();
+}
+
+void ReaderWorkspace::refreshNoteTree()
+{
+    if (!m_noteTreeWidget)
+        return;
+    const QString selected = selectedNoteNodeId();
+    m_noteTreeWidget->clear();
+    if (!m_session)
+        return;
+
+    std::function<void(const QString &, QTreeWidgetItem *)> addChildren =
+        [&](const QString &parentId, QTreeWidgetItem *parentItem) {
+            const QStringList childIds = m_session->noteTree().childIds(parentId);
+            for (const QString &nodeId : childIds) {
+                const NoteTreeNode *node = m_session->noteTree().findNode(nodeId);
+                if (!node)
+                    continue;
+                if (node->type == NoteNodeType::Group) {
+                    auto *item = parentItem ? new QTreeWidgetItem(parentItem)
+                                            : new QTreeWidgetItem(m_noteTreeWidget);
+                    item->setText(0, node->title.isEmpty() ? tr("未命名分组") : node->title);
+                    item->setIcon(0, IconManager::instance()->icon(QStringLiteral("folder"), 18));
+                    item->setData(0, Qt::UserRole, node->id);
+                    addChildren(node->id, item);
+                    item->setExpanded(true);
+                } else {
+                    const Note *note = m_session->note(node->noteId);
+                    if (!note)
+                        continue;
+                    auto *item = parentItem ? new QTreeWidgetItem(parentItem)
+                                            : new QTreeWidgetItem(m_noteTreeWidget);
+                    QString label = note->displayTitle();
+                    if (!note->annotationId.isEmpty()) {
+                        if (const Annotation *annotation = m_session->annotationForNote(note->id))
+                            label += tr("  · 第 %1 页").arg(annotation->pageIndex + 1);
+                    }
+                    item->setText(0, label);
+                    item->setIcon(0, IconManager::instance()->icon(QStringLiteral("sticky-note"), 18));
+                    item->setData(0, Qt::UserRole, node->id);
+                    item->setToolTip(0, note->markdown);
+                }
+            }
+        };
+    addChildren(QString(), nullptr);
+    if (!selected.isEmpty()) {
+        QTreeWidgetItemIterator it(m_noteTreeWidget);
+        while (*it) {
+            if ((*it)->data(0, Qt::UserRole).toString() == selected) {
+                m_noteTreeWidget->setCurrentItem(*it);
+                break;
+            }
+            ++it;
+        }
+    }
+}
+
+void ReaderWorkspace::updateNotePreview()
+{
+    if (!m_notePreview || !m_noteInfoLabel || !m_session)
+        return;
+    const Note *note = nullptr;
+    const QString nodeId = selectedNoteNodeId();
+    if (!nodeId.isEmpty()) {
+        if (const NoteTreeNode *node = m_session->noteTree().findNode(nodeId))
+            note = m_session->note(node->noteId);
+        if (!note && m_session->noteTree().isGroup(nodeId)) {
+            m_noteInfoLabel->setText(tr("分组：%1").arg(m_session->noteTree().findNode(nodeId)->title));
+            m_notePreview->setNoteMarkdown(QString(), m_session->bookDirectory());
+            return;
+        }
+    }
+    if (!note) {
+        if (const Annotation *annotation = currentAnnotation())
+            note = m_session->noteForAnnotation(annotation->id);
+    }
+    if (!note) {
+        m_noteInfoLabel->setText(tr("选择笔记查看预览，或选择一个标注创建关联笔记。"));
+        m_notePreview->setNoteMarkdown(QString(), m_session->bookDirectory());
         return;
     }
-    const Annotation *annotation = currentAnnotation();
-    if (!annotation) {
-        m_notePanel->clearNote(tr("选择一个批注后可以查看和编辑它的笔记。"));
-        m_notePanel->setEditable(false);
+    const Annotation *annotation = note->annotationId.isEmpty()
+                                       ? nullptr
+                                       : m_session->view()->annotations()->find(note->annotationId);
+    m_noteInfoLabel->setText(annotation
+        ? tr("%1 · 关联第 %2 页").arg(note->displayTitle()).arg(annotation->pageIndex + 1)
+        : tr("%1 · 独立笔记").arg(note->displayTitle()));
+    m_notePreview->setNoteMarkdown(note->markdown, m_session->bookDirectory());
+}
+
+QString ReaderWorkspace::selectedNoteNodeId() const
+{
+    if (!m_noteTreeWidget || !m_noteTreeWidget->currentItem())
+        return QString();
+    return m_noteTreeWidget->currentItem()->data(0, Qt::UserRole).toString();
+}
+
+QString ReaderWorkspace::selectedParentGroupId() const
+{
+    if (!m_session)
+        return QString();
+    const QString nodeId = selectedNoteNodeId();
+    if (nodeId.isEmpty())
+        return QString();
+    if (m_session->noteTree().isGroup(nodeId))
+        return nodeId;
+    return m_session->noteTree().parentOf(nodeId);
+}
+
+void ReaderWorkspace::openNoteEditor(const QString &noteId)
+{
+    if (!m_session || noteId.isEmpty())
+        return;
+    if (m_noteDialog && m_noteDialog->isVisible()
+        && m_noteDialog->hasUnsavedChanges()
+        && m_noteDialog->currentNoteId() != noteId) {
+        showStatus(tr("请先保存或取消当前笔记编辑，再切换笔记。"));
         return;
     }
-    m_notePanel->setBaseDirectory(m_session ? m_session->bookDirectory() : QString());
-    m_notePanel->setEditable(true);
-    m_notePanel->setHeading(annotation->note.title.isEmpty()
-                                ? annotationTypeDisplayName(annotation->type)
-                                : annotation->note.title);
-    m_notePanel->setNote(annotation->note.markdown);
+    if (!m_noteDialog) {
+        m_noteDialog = new NoteEditDialog(m_session, this);
+        connect(m_noteDialog, &NoteEditDialog::saved, this, [this](const QString &id) {
+            refreshReadingData();
+            if (m_rightTabs)
+                m_rightTabs->setCurrentIndex(1);
+            Q_UNUSED(id);
+        });
+        connect(m_noteDialog, &NoteEditDialog::closed, this, [this] {
+            if (!m_pendingNoteAnnotationId.isEmpty() && m_session
+                && (!m_session->hasLinkedNote(m_pendingNoteAnnotationId))
+                && (m_pendingNoteAnnotationIsNew
+                    || (m_view->annotations()->find(m_pendingNoteAnnotationId)
+                        && m_view->annotations()->find(m_pendingNoteAnnotationId)->type
+                               == AnnotationType::NotePoint))) {
+                m_view->deleteAnnotation(m_pendingNoteAnnotationId, true);
+            }
+            m_pendingNoteAnnotationId.clear();
+            m_pendingNoteAnnotationIsNew = false;
+            refreshReadingData();
+        });
+    }
+    m_noteDialog->openExistingNote(noteId);
+}
+
+void ReaderWorkspace::openNoteForAnnotation(const QString &annotationId)
+{
+    if (!m_session || annotationId.isEmpty())
+        return;
+    if (const Note *note = m_session->noteForAnnotation(annotationId)) {
+        openNoteEditor(note->id);
+        return;
+    }
+    if (m_noteDialog && m_noteDialog->isVisible()
+        && m_noteDialog->hasUnsavedChanges()) {
+        showStatus(tr("请先保存或取消当前笔记编辑，再切换笔记。"));
+        return;
+    }
+    if (!m_noteDialog) {
+        m_noteDialog = new NoteEditDialog(m_session, this);
+        connect(m_noteDialog, &NoteEditDialog::saved, this, [this](const QString &) {
+            refreshReadingData();
+        });
+        connect(m_noteDialog, &NoteEditDialog::closed, this, [this] {
+            if (!m_pendingNoteAnnotationId.isEmpty() && m_session
+                && (!m_session->hasLinkedNote(m_pendingNoteAnnotationId))
+                && (m_pendingNoteAnnotationIsNew
+                    || (m_view->annotations()->find(m_pendingNoteAnnotationId)
+                        && m_view->annotations()->find(m_pendingNoteAnnotationId)->type
+                               == AnnotationType::NotePoint))) {
+                m_view->deleteAnnotation(m_pendingNoteAnnotationId, true);
+            }
+            m_pendingNoteAnnotationId.clear();
+            m_pendingNoteAnnotationIsNew = false;
+            refreshReadingData();
+        });
+    }
+    m_noteDialog->openNewNote(selectedParentGroupId(), annotationId);
+}
+
+void ReaderWorkspace::createIndependentNote(const QString &parentGroupId)
+{
+    if (!m_session)
+        return;
+    if (m_noteDialog && m_noteDialog->isVisible()
+        && m_noteDialog->hasUnsavedChanges()) {
+        showStatus(tr("请先保存或取消当前笔记编辑，再新建笔记。"));
+        return;
+    }
+    if (!m_noteDialog) {
+        m_noteDialog = new NoteEditDialog(m_session, this);
+        connect(m_noteDialog, &NoteEditDialog::saved, this, [this](const QString &) {
+            refreshReadingData();
+            if (m_rightTabs)
+                m_rightTabs->setCurrentIndex(1);
+        });
+        connect(m_noteDialog, &NoteEditDialog::closed, this, [this] {
+            if (!m_pendingNoteAnnotationId.isEmpty() && m_session
+                && (!m_session->hasLinkedNote(m_pendingNoteAnnotationId))
+                && (m_pendingNoteAnnotationIsNew
+                    || (m_view->annotations()->find(m_pendingNoteAnnotationId)
+                        && m_view->annotations()->find(m_pendingNoteAnnotationId)->type
+                               == AnnotationType::NotePoint))) {
+                m_view->deleteAnnotation(m_pendingNoteAnnotationId, true);
+            }
+            m_pendingNoteAnnotationId.clear();
+            m_pendingNoteAnnotationIsNew = false;
+            refreshReadingData();
+        });
+    }
+    m_noteDialog->openNewNote(parentGroupId);
+}
+
+void ReaderWorkspace::createGroupUnder(const QString &parentGroupId)
+{
+    if (!m_session)
+        return;
+    bool ok = false;
+    const QString title = QInputDialog::getText(this, tr("新建分组"), tr("分组名称"),
+                                                QLineEdit::Normal, tr("新建分组"), &ok);
+    if (!ok || title.trimmed().isEmpty())
+        return;
+    QString groupId;
+    QString error;
+    if (!m_session->createGroup(parentGroupId, title.trimmed(), &groupId, &error)) {
+        showStatus(error);
+        return;
+    }
+    refreshNoteTree();
+    QTreeWidgetItemIterator it(m_noteTreeWidget);
+    while (*it) {
+        if ((*it)->data(0, Qt::UserRole).toString() == groupId) {
+            m_noteTreeWidget->setCurrentItem(*it);
+            break;
+        }
+        ++it;
+    }
+    updateNotePreview();
+}
+
+void ReaderWorkspace::renameSelectedNoteNode()
+{
+    if (!m_session)
+        return;
+    const QString nodeId = selectedNoteNodeId();
+    const NoteTreeNode *node = m_session->noteTree().findNode(nodeId);
+    if (!node)
+        return;
+    if (node->type == NoteNodeType::Group) {
+        bool ok = false;
+        const QString title = QInputDialog::getText(this, tr("重命名分组"), tr("名称"),
+                                                    QLineEdit::Normal, node->title, &ok);
+        if (!ok || title.trimmed().isEmpty())
+            return;
+        QString error;
+        if (!m_session->renameGroup(nodeId, title.trimmed(), &error))
+            showStatus(error);
+    } else if (const Note *note = m_session->note(node->noteId); note) {
+        bool ok = false;
+        const QString title = QInputDialog::getText(this, tr("重命名笔记"), tr("标题"),
+                                                    QLineEdit::Normal, note->title, &ok);
+        if (!ok || title.trimmed().isEmpty())
+            return;
+        Note updated = *note;
+        updated.title = title.trimmed();
+        QString error;
+        if (!m_session->updateNote(updated, &error))
+            showStatus(error);
+    }
+    refreshReadingData();
+}
+
+void ReaderWorkspace::moveSelectedNoteNode()
+{
+    if (!m_session)
+        return;
+    const QString nodeId = selectedNoteNodeId();
+    const NoteTreeNode *node = m_session->noteTree().findNode(nodeId);
+    if (!node)
+        return;
+    QStringList labels;
+    QStringList ids;
+    labels << tr("书库根目录");
+    ids << QString();
+    std::function<void(const QString &, const QString &)> collect =
+        [&](const QString &parentId, const QString &prefix) {
+            const QStringList children = m_session->noteTree().childIds(parentId);
+            for (const QString &childId : children) {
+                const NoteTreeNode *child = m_session->noteTree().findNode(childId);
+                if (!child || child->type != NoteNodeType::Group || child->id == nodeId)
+                    continue;
+                QString label = prefix + (child->title.isEmpty() ? tr("未命名分组") : child->title);
+                labels << label;
+                ids << child->id;
+                collect(child->id, label + QStringLiteral(" / "));
+            }
+        };
+    collect(QString(), QString());
+    bool ok = false;
+    const QString choice = QInputDialog::getItem(this, tr("移动笔记节点"), tr("目标分组"),
+                                                 labels, 0, false, &ok);
+    if (!ok)
+        return;
+    const int index = labels.indexOf(choice);
+    if (index < 0)
+        return;
+    QString error;
+    if (!m_session->moveTreeNode(nodeId, ids.at(index), &error))
+        showStatus(error);
+    refreshReadingData();
+}
+
+void ReaderWorkspace::deleteSelectedNoteNode()
+{
+    if (!m_session)
+        return;
+    const QString nodeId = selectedNoteNodeId();
+    const NoteTreeNode *node = m_session->noteTree().findNode(nodeId);
+    if (!node)
+        return;
+    QString error;
+    if (node->type == NoteNodeType::Group) {
+        if (QMessageBox::question(this, tr("删除分组"),
+                                  tr("删除分组“%1”？直接子节点会上移到上一级。")
+                                      .arg(node->title),
+                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+            != QMessageBox::Yes)
+            return;
+        if (!m_session->deleteGroup(nodeId, true, &error))
+            showStatus(error);
+    } else if (const Note *note = m_session->note(node->noteId); note) {
+        const Annotation *annotation = note->annotationId.isEmpty()
+                                           ? nullptr
+                                           : m_session->view()->annotations()->find(note->annotationId);
+        const bool removePoint = annotation && annotation->type == AnnotationType::NotePoint;
+        const QString message = removePoint
+            ? tr("删除笔记“%1”会同时删除对应的笔记点。").arg(note->displayTitle())
+            : tr("删除笔记“%1”？关联的标注会保留。").arg(note->displayTitle());
+        if (QMessageBox::question(this, tr("删除笔记"), message,
+                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+            != QMessageBox::Yes)
+            return;
+        if (m_session->deleteNote(note->id, removePoint, &error)) {
+            if (removePoint)
+                m_view->selectAnnotation(QString());
+        } else {
+            showStatus(error);
+        }
+    }
+    refreshReadingData();
+}
+
+void ReaderWorkspace::showNoteContextMenu(const QPoint &pos)
+{
+    QTreeWidgetItem *item = m_noteTreeWidget ? m_noteTreeWidget->itemAt(pos) : nullptr;
+    if (item)
+        m_noteTreeWidget->setCurrentItem(item);
+    QMenu menu(this);
+    QAction *newNote = menu.addAction(tr("新建笔记"));
+    QAction *newGroup = menu.addAction(tr("新建分组"));
+    menu.addSeparator();
+    QAction *rename = menu.addAction(tr("重命名"));
+    QAction *move = menu.addAction(tr("移动到…"));
+    QAction *remove = menu.addAction(tr("删除"));
+    QAction *chosen = menu.exec(m_noteTreeWidget->viewport()->mapToGlobal(pos));
+    if (chosen == newNote)
+        createIndependentNote(selectedParentGroupId());
+    else if (chosen == newGroup)
+        createGroupUnder(selectedParentGroupId());
+    else if (chosen == rename)
+        renameSelectedNoteNode();
+    else if (chosen == move)
+        moveSelectedNoteNode();
+    else if (chosen == remove)
+        deleteSelectedNoteNode();
 }
 
 bool ReaderWorkspace::isEditingNote() const
 {
-    return !m_editingId.isEmpty();
+    return m_noteDialog && m_noteDialog->isVisible() && m_noteDialog->hasUnsavedChanges();
 }
 
 void ReaderWorkspace::beginNoteEdit()
 {
-    const Annotation *annotation = currentAnnotation();
-    if (!annotation)
+    if (const Annotation *annotation = currentAnnotation()) {
+        openNoteForAnnotation(annotation->id);
         return;
-    if (isEditingNote() && m_editingId != annotation->id)
-        commitNoteEdit();
-    m_editingId = annotation->id;
-    m_notePanel->setEditable(true);
-    if (!m_notePanel->isEditing())
-        m_notePanel->beginEdit();
-    if (m_rightTabs)
-        m_rightTabs->setCurrentIndex(0);
-    showStatus(tr("正在编辑笔记：%1").arg(annotation->note.title.isEmpty()
-                                            ? annotationTypeDisplayName(annotation->type)
-                                            : annotation->note.title));
+    }
+    const QString nodeId = selectedNoteNodeId();
+    if (!nodeId.isEmpty()) {
+        if (const NoteTreeNode *node = m_session->noteTree().findNode(nodeId)) {
+            if (node->type == NoteNodeType::Note) {
+                openNoteEditor(node->noteId);
+                return;
+            }
+            createIndependentNote(node->id);
+            return;
+        }
+    }
+    createIndependentNote(selectedParentGroupId());
 }
 
 void ReaderWorkspace::commitNoteEdit()
 {
-    commitPendingNote();
-    stopNoteTimers();
-    if (m_notePanel && m_notePanel->isEditing())
-        m_notePanel->endEdit();
-    m_editingId.clear();
-    m_noteDirty = false;
-    updateNotePanel();
-    updateDetailPanel();
+    QString error;
+    if (!commitPendingNote(&error)) {
+        if (!error.isEmpty())
+            showStatus(error);
+        return;
+    }
+    if (m_noteDialog && m_noteDialog->isVisible())
+        m_noteDialog->accept();
+    refreshReadingData();
 }
 
-void ReaderWorkspace::commitPendingNote()
+bool ReaderWorkspace::commitPendingNote(QString *errorMessage)
 {
-    if (m_editingId.isEmpty() || !m_notePanel)
-        return;
-    const Annotation *annotation = m_view->annotations()->find(m_editingId);
-    if (!annotation) {
-        m_editingId.clear();
-        return;
-    }
-    const QString markdown = m_notePanel->markdown();
-    QString title = annotation->note.title;
-    if (title.isEmpty()) {
-        title = noteTitleFor(*annotation);
-    }
-    AnnotationNote note;
-    note.title = title;
-    note.markdown = markdown;
-    if (annotation->note.markdown == note.markdown && annotation->note.title == note.title)
-        return;
-
-    m_applyingSelection = true;
-    m_view->setAnnotationNote(m_editingId, note);
-    m_applyingSelection = false;
-    m_noteDirty = false;
+    if (!m_noteDialog || !m_noteDialog->hasUnsavedChanges())
+        return true;
+    return m_noteDialog->commitIfDirty(errorMessage);
 }
 
 void ReaderWorkspace::cancelNoteEdit()
 {
-    stopNoteTimers();
-    m_noteDirty = false;
-    if (m_notePanel && m_notePanel->isEditing())
-        m_notePanel->endEdit();
-    m_editingId.clear();
-    updateNotePanel();
+    if (m_noteDialog)
+        m_noteDialog->reject();
+    refreshReadingData();
 }
 
-QString ReaderWorkspace::noteTitleFor(const Annotation &annotation) const
+void ReaderWorkspace::refreshReadingData()
 {
-    QString text = m_notePanel ? m_notePanel->markdown().trimmed() : QString();
-    if (text.isEmpty())
-        return annotationTypeDisplayName(annotation.type);
-    const QString firstLine = text.section(QLatin1Char('\n'), 0, 0).trimmed();
-    QString title = firstLine;
-    while (title.startsWith(QLatin1Char('#')) || title.startsWith(QLatin1Char('>'))
-           || title.startsWith(QLatin1Char('-')) || title.startsWith(QLatin1Char('*')))
-        title.remove(0, 1);
-    title = title.trimmed();
-    if (title.size() > 40)
-        title = title.left(39) + QChar(0x2026);
-    return title.isEmpty() ? annotationTypeDisplayName(annotation.type) : title;
-}
-
-void ReaderWorkspace::markNoteDirty()
-{
-    if (m_editingId.isEmpty())
-        return;
-    m_noteDirty = true;
-    if (m_session)
-        m_session->noteActivity();
-    if (m_noteTimer)
-        m_noteTimer->start();
-    if (m_noteMaxTimer && !m_noteMaxStarted) {
-        m_noteMaxStarted = true;
-        m_noteMaxTimer->start();
-    }
-}
-
-void ReaderWorkspace::stopNoteTimers()
-{
-    if (m_noteTimer)
-        m_noteTimer->stop();
-    if (m_noteMaxTimer)
-        m_noteMaxTimer->stop();
-    m_noteMaxStarted = false;
+    refreshAnnotationList();
+    refreshNoteTree();
+    updateNotePreview();
+    updateDetailPanel();
+    updateContextToolBar();
+    updateBottomStatus();
 }
 
 void ReaderWorkspace::onToolChanged(PdfView::Tool tool)
@@ -2256,8 +2706,9 @@ void ReaderWorkspace::insertImageIntoNote()
         showStatus(error);
         return;
     }
-    m_notePanel->insertMarkdown(QStringLiteral("![%1](%2)")
-                                    .arg(QFileInfo(path).completeBaseName(), relative));
+    if (m_noteDialog)
+        m_noteDialog->insertMarkdown(QStringLiteral("![%1](%2)")
+                                         .arg(QFileInfo(path).completeBaseName(), relative));
 }
 
 void ReaderWorkspace::startRegionCapture()
@@ -2294,7 +2745,8 @@ void ReaderWorkspace::finishCapture(const QRect &rect)
         showStatus(error);
         return;
     }
-    m_notePanel->insertMarkdown(QStringLiteral("![区域截图](%1)").arg(relative));
+    if (m_noteDialog)
+        m_noteDialog->insertMarkdown(QStringLiteral("![区域截图](%1)").arg(relative));
     showStatus(tr("已插入区域截图"));
 }
 
@@ -2510,7 +2962,10 @@ void ReaderWorkspace::refreshSearchResults()
 {
     if (!m_searchModel || !m_searchResults || !m_searchEdit)
         return;
-    if (m_searchModel->searchString() != m_searchEdit->text().trimmed())
+    const QString query = m_searchEdit->text().trimmed();
+    if (query.isEmpty())
+        return;
+    if (m_searchModel->searchString() != query)
         return;
     const int count = m_searchModel->count();
     m_searchResults->clear();

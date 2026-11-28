@@ -663,23 +663,25 @@ bool LibraryStore::writeDocument(const QString &bookDirectory, const BookDocumen
     return writeJsonObjectAtomic(path, root, errorMessage);
 }
 
-bool LibraryStore::readAnnotations(const QString &bookDirectory, const QString &bookId,
-                                   QJsonArray *annotations, QString *errorMessage) const
+bool LibraryStore::readReadingData(const QString &bookDirectory, const QString &bookId,
+                                   QJsonArray *annotations, QJsonArray *notes,
+                                   QJsonArray *noteTree, QString *errorMessage) const
 {
-    if (!annotations)
+    if (!annotations || !notes || !noteTree)
         return false;
+    *annotations = QJsonArray();
+    *notes = QJsonArray();
+    *noteTree = QJsonArray();
     const QString path = QDir(absoluteBookDirectory(bookDirectory)).filePath(QStringLiteral("annotations.json"));
-    if (!QFileInfo::exists(path)) {
-        *annotations = QJsonArray();
+    if (!QFileInfo::exists(path))
         return true;
-    }
     QJsonObject root;
     if (!readJsonObject(path, &root, errorMessage))
         return false;
     if (root.value(QStringLiteral("format")).toString() != QLatin1String("pano-annotations")
-        || root.value(QStringLiteral("schema_version")).toInt(-1) != 1) {
+        || root.value(QStringLiteral("schema_version")).toInt(-1) != 2) {
         if (errorMessage)
-            *errorMessage = QStringLiteral("annotations.json 格式或版本无效：%1").arg(path);
+            *errorMessage = QStringLiteral("annotations.json 格式或版本无效（需要 schema_version 2）：%1").arg(path);
         return false;
     }
     if (root.value(QStringLiteral("book_id")).toString() != bookId) {
@@ -687,25 +689,31 @@ bool LibraryStore::readAnnotations(const QString &bookDirectory, const QString &
             *errorMessage = QStringLiteral("annotations.json 的 book_id 与书籍不一致：%1").arg(path);
         return false;
     }
-    const QJsonValue value = root.value(QStringLiteral("annotations"));
-    if (!value.isArray()) {
+    const QJsonValue annotationValue = root.value(QStringLiteral("annotations"));
+    const QJsonValue noteValue = root.value(QStringLiteral("notes"));
+    const QJsonValue treeValue = root.value(QStringLiteral("note_tree"));
+    if (!annotationValue.isArray() || !noteValue.isArray() || !treeValue.isArray()) {
         if (errorMessage)
-            *errorMessage = QStringLiteral("annotations.json 的 annotations 字段无效：%1").arg(path);
+            *errorMessage = QStringLiteral("annotations.json 的 annotations/notes/note_tree 字段无效：%1").arg(path);
         return false;
     }
-    *annotations = value.toArray();
+    *annotations = annotationValue.toArray();
+    *notes = noteValue.toArray();
+    *noteTree = treeValue.toArray();
     return true;
 }
 
-bool LibraryStore::writeAnnotations(const QString &bookDirectory, const QString &bookId,
-                                    const QJsonArray &annotations, QString *errorMessage)
+bool LibraryStore::writeReadingData(const QString &bookDirectory, const QString &bookId,
+                                    const QJsonArray &annotations, const QJsonArray &notes,
+                                    const QJsonArray &noteTree, QString *errorMessage)
 {
     QJsonObject root;
     root.insert(QStringLiteral("format"), QStringLiteral("pano-annotations"));
-    root.insert(QStringLiteral("schema_version"), 1);
+    root.insert(QStringLiteral("schema_version"), 2);
     root.insert(QStringLiteral("book_id"), bookId);
     root.insert(QStringLiteral("annotations"), annotations);
-    root.insert(QStringLiteral("note_tree"), QJsonArray());
+    root.insert(QStringLiteral("notes"), notes);
+    root.insert(QStringLiteral("note_tree"), noteTree);
     const QString path = QDir(absoluteBookDirectory(bookDirectory)).filePath(QStringLiteral("annotations.json"));
     return writeJsonObjectAtomic(path, root, errorMessage);
 }

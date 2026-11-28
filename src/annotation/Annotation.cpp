@@ -200,12 +200,6 @@ QJsonObject Annotation::toJson() const
     root.insert(QStringLiteral("created_at"), createdAt);
     root.insert(QStringLiteral("modified_at"), modifiedAt);
 
-    if (!note.isEmpty()) {
-        QJsonObject noteObject;
-        noteObject.insert(QStringLiteral("title"), note.title);
-        noteObject.insert(QStringLiteral("markdown"), note.markdown);
-        root.insert(QStringLiteral("note"), noteObject);
-    }
     return root;
 }
 
@@ -372,9 +366,6 @@ bool Annotation::fromJson(const QJsonObject &object, Annotation *out, QString *e
     if (result.modifiedAt.isEmpty())
         result.modifiedAt = result.createdAt;
 
-    const QJsonObject noteObject = object.value(QStringLiteral("note")).toObject();
-    result.note.title = noteObject.value(QStringLiteral("title")).toString();
-    result.note.markdown = noteObject.value(QStringLiteral("markdown")).toString();
 
     *out = result;
     return true;

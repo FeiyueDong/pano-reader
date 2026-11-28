@@ -3,19 +3,18 @@
 PANO 是一款本地优先的 PDF 阅读与标注工作区。它把 PDF 视为只读源文件，在独立的书库
 目录中保存标注、阅读状态和 Markdown 笔记；不依赖账号、云端或网络。
 
-当前版本是 Phase 2.2 阅读器稳定与回归修复版本。在 Phase 2.1 的顶部两级工具栏、
-三栏阅读工作区和四种页面布局基础上，修复了非连续滚轮翻页、Shift 铅笔/荧光笔路径、
-统一 Esc 分层、属性栏高度抖动、缩略图可见范围/缓存/失败重试、页码按钮语义、不透明度
-提交、全屏查找和搜索计数；并保留 Phase 2 的搜索、书签、历史、全屏和连续橡皮。
-Phase 0 的 Demo 已归档到 [`demo/`](demo/)，根工程不再依赖 Demo 代码。
+当前版本是 Phase 3.1 独立笔记模型与笔记树版本。在 Phase 2.2 阅读器基础上，笔记从
+标注内嵌字段拆分为独立 `Note` 模型和 `NoteTree`，标注与笔记保持可选的一对一关联；
+新增笔记树、独立笔记编辑器和 `annotations.json` schema 2。旧的 schema 1 数据会被明确
+拒绝，不做自动迁移。
+Phase 0 的 PDF Demo 和 Phase 3.0 Markdown Demo 归档在 [`demo/`](demo/)，由根工程
+选项按需构建，默认不参与正式构建。
+
+![笔记树](docs/development/log/phase3.1-note-tree.png)
+
+![笔记编辑器](docs/development/log/phase3.1-note-editor.png)
 
 ![阅读器](docs/development/log/phase2.2-layout.png)
-
-![缩略图](docs/development/log/phase2.2-thumbnails.png)
-
-![查找](docs/development/log/phase2.2-search.png)
-
-![全屏](docs/development/log/phase2.2-fullscreen.png)
 
 ## 功能
 
@@ -39,14 +38,20 @@ Phase 0 的 Demo 已归档到 [`demo/`](demo/)，根工程不再依赖 Demo 代�
   出发点；大文档打开计时探针。
 - 阅读稳定性：属性栏固定单行高度；缩略图按可见范围异步加载、缓存命中直接显示、失败
   有限重试；不透明度修改防抖提交；全屏查找先恢复全屏外查找面板。
-- 笔记与标注操作：标注附带 Markdown 笔记、图片、区域截图和本地公式渲染；笔记 2 秒
-  空闲自动保存。选择对象可复制/粘贴/复制一份，使用自定义 MIME 保留完整样式。
+- 独立笔记与笔记树：笔记拥有稳定的独立 ID、标题和 Markdown 正文；可放在书库根分组
+  或多级笔记树中，也可与一个标注建立可选的一对一关联。右侧笔记页提供新建笔记/分组、
+  重命名、移动、排序、删除、关联/解除关联和精确定位；独立非模态编辑器绑定
+  `book_id + note_id`，支持保存继续、确定关闭、取消和关闭前保存提示。
+- 笔记内容：支持 Markdown、图片、区域截图和本地公式渲染；笔记草稿在保存成功前不写入
+  书库，保存失败保留草稿。选择对象可复制/粘贴/复制一份，使用自定义 MIME 保留完整样式，
+  但不会复制笔记或关联。
 - 工具预设：每个工具独立保存颜色、线宽、线型、描边、填充、透明度和混合模式；新建
   标注不受其他工具或旧标注影响。设置窗口修改按工具暂存，应用/确定才写入。
 - 书库：三栏浏览、封面/列表切换、面包屑、直接子书架书籍、拖拽加入书架/收藏/回收站。
 - 工作区：书库标签页 + 可关闭的阅读标签页；每个标签独立保存阅读状态、阅读锚点和撤销
   历史。
-- 橡皮：按住拖动连续擦除对象，半径 4–25 px 可调，一次拖动一步撤销，带笔记对象需确认。
+- 橡皮：按住拖动连续擦除对象，半径 4–25 px 可调，一次拖动一步撤销；关联笔记的标注
+  默认跳过，需通过标注列表或右键菜单显式处理笔记。
 - 可靠性：`QSaveFile` 原子写入、书库单实例锁、外部修改检测、源 PDF 哈希校验；永久删除
   使用隔离目录和恢复标记，失败可回滚。
 - 外观：四套主题（现代浅色、经典、暖色、现代深色），界面字体与标注默认样式可调。
@@ -69,8 +74,11 @@ Phase 0 的 Demo 已归档到 [`demo/`](demo/)，根工程不再依赖 Demo 代�
 
 ## 构建
 
+根目录 `xmake.lua` 是仓库唯一正式构建入口。默认只构建正式程序及其探针，不探测或
+链接任何 Demo 依赖：
+
 ```bash
-xmake f -c -m debug --qt=/path/to/Qt/6.x.y/gcc_64
+xmake f -c -m debug --qt=/path/to/Qt/6.x.y/gcc_64 --build_demo=n --build_markdown_demo=n
 xmake -j4
 ```
 
@@ -79,6 +87,25 @@ xmake -j4
 
 可执行文件位于 `build/linux/x86_64/debug/pano-reader`（Linux）。发布构建把
 `-m debug` 换成 `-m release`。
+
+### 可选 Demo
+
+两个独立选项默认均为 `n`；只有显式启用时才包含对应局部 xmake targets。切换选项后
+建议先执行 `xmake f -c`，避免旧配置和目标缓存残留。
+
+```bash
+# Phase 0 PDF Demo（targets 以 pano-demo- 开头）
+xmake f -c -m debug --qt=/path/to/Qt/6.x.y/gcc_64 --build_demo=y --build_markdown_demo=n
+xmake build -j4 pano-demo-reader
+
+# Phase 3.0 Markdown Demo（需先准备 MD4C / JKQTMathText）
+xmake f -c -m debug --qt=/path/to/Qt/6.x.y/gcc_64 --build_demo=n --build_markdown_demo=y
+xmake build -j4 pano-markdown-demo
+```
+
+Markdown Demo 依赖准备与详细说明见 [`demo/markdown/README.md`](demo/markdown/README.md)。
+关闭 Demo 时重新配置两个选项为 `n` 即可；官方正式目标名称（`pano-reader`、
+`pano-*-probe` 等）保持不变。
 
 ## 运行
 
@@ -112,7 +139,9 @@ xmake -j4
 ```
 
 本机配置（主题、上次书库、打开标签、映射源覆盖）放在 Qt 配置目录，不写入书库。
-完整字段与语义见 [`docs/specification/phase1-data-formats.md`](docs/specification/phase1-data-formats.md)（Phase 2/2.1/2.2 增补了布局、缩放模式、书签字段、滚轮翻页、缩略图并发语义和阅读器面板宽度）。
+完整字段与语义见 [`docs/specification/phase1-data-formats.md`](docs/specification/phase1-data-formats.md)。
+Phase 3.1 起 `annotations.json` 使用 `schema_version: 2`，同时保存 `annotations`、
+`notes` 和 `note_tree`；旧 schema 1 会被拒绝读取并保持原文件不变。
 
 原则：
 
@@ -131,6 +160,7 @@ xmake -j4                                  # 全部目标
 ./build/linux/x86_64/debug/pano-text-geometry-probe
 ./build/linux/x86_64/debug/pano-interaction-probe
 ./build/linux/x86_64/debug/pano-phase2-probe
+./build/linux/x86_64/debug/pano-note-probe examples/sample-paper.pdf
 ./build/linux/x86_64/debug/pano-open-timing "/path/to/book.pdf"
 ./build/linux/x86_64/debug/pano-pdf-timing examples/sample-paper.pdf
 PANO_CONFIG_DIR=/tmp/pano-config QT_QPA_PLATFORM=offscreen \
@@ -140,9 +170,10 @@ PANO_CONFIG_DIR=/tmp/pano-config QT_QPA_PLATFORM=offscreen \
 探针覆盖数据安全、导入与哈希、书架不变量、标注/笔记持久化、外部修改保护、阅读状态、
 四种旋转与滚动坐标变换、文字选区合并、智能选择与浮动操作、主题与设置取消、四种页面
 布局、缩放模式、搜索/书签/导航、复制粘贴、橡皮连续擦除、滚轮翻页冷却、Shift 两点路径、
-属性栏高度、缩略图缓存与全屏退出；不替代人工 GUI 验收。结果记录在
-[`docs/development/log/phase2.2-results.md`](docs/development/log/phase2.2-results.md)，
-Phase 2.1 见 [`phase2.1-results.md`](docs/development/log/phase2.1-results.md)，Phase 2
+属性栏高度、缩略图缓存与全屏退出；不替代人工 GUI 验收。Phase 3.1 见
+[`phase3.1-results.md`](docs/development/log/phase3.1-results.md)，Phase 2.2 见
+[`phase2.2-results.md`](docs/development/log/phase2.2-results.md)，Phase 2.1 见
+[`phase2.1-results.md`](docs/development/log/phase2.1-results.md)，Phase 2
 见 [`phase2-results.md`](docs/development/log/phase2-results.md)，Phase 1.2 见
 [`phase1.2-results.md`](docs/development/log/phase1.2-results.md)。
 
@@ -150,13 +181,13 @@ Phase 2.1 见 [`phase2.1-results.md`](docs/development/log/phase2.1-results.md)�
 
 | 路径 | 内容 |
 | --- | --- |
-| `src/app/` | `MainWindow`、`LibraryView`、`ReaderWorkspace`、`NotePanel` 等界面 |
+| `src/app/` | `MainWindow`、`LibraryView`、`ReaderWorkspace`、`NoteEditDialog`、图标与界面组件 |
 | `src/library/` | 书库、书籍、书架、导入与源文件解析 |
-| `src/document/` | 书籍文档会话、自动保存、阅读状态 |
+| `src/document/` | 书籍文档会话、笔记/标注事务、自动保存、阅读状态、书签 |
 | `src/pdf/` | Qt PDF 文档封装与异步页面渲染缓存 |
 | `src/reader/` | 分页布局与 PDF 视图 |
 | `src/annotation/` | 标注数据、模型、命令、绘制与命中 |
-| `src/note/` | Markdown/公式渲染、笔记预览 |
+| `src/note/` | 独立笔记模型、笔记树、Markdown/公式渲染与预览 |
 | `src/storage/` | JSON 原子写入、书库存储 |
 | `src/settings/` | 本机配置、主题、设置窗口 |
 | `docs/specification/` | 数据格式规范 |

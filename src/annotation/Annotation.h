@@ -52,13 +52,6 @@ struct AnnotationStyle {
     bool hasFill() const { return fillColor.isValid(); }
 };
 
-struct AnnotationNote {
-    QString title;
-    QString markdown;
-
-    bool isEmpty() const { return title.trimmed().isEmpty() && markdown.trimmed().isEmpty(); }
-};
-
 struct Annotation {
     QString id;
     int pageIndex = 0;
@@ -76,7 +69,6 @@ struct Annotation {
     int textEnd = -1;
     QString text;
 
-    AnnotationNote note;
     QString createdAt;
     QString modifiedAt;
 

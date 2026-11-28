@@ -755,7 +755,7 @@ void PdfView::deleteAnnotation(const QString &annotationId, bool confirmed)
     if (!annotation)
         return;
 
-    if (!confirmed && !annotation->note.isEmpty()) {
+    if (!confirmed && m_noteQuery && m_noteQuery(annotationId)) {
         emit noteDeleteRequested(annotationId);
         return;
     }
@@ -766,10 +766,7 @@ void PdfView::deleteAnnotation(const QString &annotationId, bool confirmed)
         m_selectedId.clear();
         emit annotationSelectionChanged(QString());
     }
-    emit statusMessage(copy.note.isEmpty()
-                           ? tr("已删除%1").arg(annotationTypeDisplayName(copy.type))
-                           : tr("已删除%1及其附属笔记，可用 Ctrl+Z 撤销")
-                                 .arg(annotationTypeDisplayName(copy.type)));
+    emit statusMessage(tr("已删除%1，可用 Ctrl+Z 撤销").arg(annotationTypeDisplayName(copy.type)));
 }
 
 void PdfView::deleteSelected()
@@ -811,18 +808,9 @@ void PdfView::applyStyleToAnnotation(const QString &annotationId, const Annotati
     emit statusMessage(tr("已修改批注样式"));
 }
 
-void PdfView::setAnnotationNote(const QString &annotationId, const AnnotationNote &note)
+void PdfView::setNoteQuery(std::function<bool(const QString &)> query)
 {
-    const Annotation *annotation = m_annotations.find(annotationId);
-    if (!annotation)
-        return;
-    if (annotation->note.title == note.title && annotation->note.markdown == note.markdown)
-        return;
-    Annotation after = *annotation;
-    after.note = note;
-    after.modifiedAt = nowIsoUtc();
-    m_undoStack.push(new ModifyAnnotationCommand(&m_annotations, *annotation, after));
-    emit statusMessage(tr("已更新笔记"));
+    m_noteQuery = std::move(query);
 }
 
 void PdfView::setSelectionOverlayVisible(bool visible)
@@ -2291,7 +2279,6 @@ bool PdfView::pasteAnnotation(const QPointF &viewPos)
     annotation.id = newAnnotationId();
     annotation.createdAt = nowIsoUtc();
     annotation.modifiedAt = annotation.createdAt;
-    annotation.note = AnnotationNote();
     m_undoStack.push(new AddAnnotationCommand(&m_annotations, annotation));
     selectAnnotation(annotation.id);
     emit statusMessage(tr("已粘贴%1").arg(annotationTypeDisplayName(annotation.type)));
@@ -2309,7 +2296,6 @@ bool PdfView::duplicateSelected()
     copy.id = newAnnotationId();
     copy.createdAt = nowIsoUtc();
     copy.modifiedAt = copy.createdAt;
-    copy.note = AnnotationNote();
     const QSizeF size = m_pageSizes.value(copy.pageIndex);
     const qreal offset = 12.0;
     const QRectF bounds = copy.bounds();
@@ -2867,7 +2853,7 @@ void PdfView::eraseSegment(const QPointF &from, const QPointF &to)
         const QPainterPath mapped = pageToViewTransform(annotation.pageIndex).map(hit);
         if (!mapped.intersects(capsule))
             continue;
-        if (!annotation.note.isEmpty()) {
+        if (m_noteQuery && m_noteQuery(annotation.id)) {
             if (!m_eraseProtectedHinted) {
                 m_eraseProtectedHinted = true;
                 emit statusMessage(tr("带笔记的标注已跳过；请用选择工具删除并确认"));

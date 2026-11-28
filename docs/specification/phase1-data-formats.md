@@ -1,4 +1,4 @@
-# PANO Phase 1/2 数据格式规范
+# PANO Phase 1/2/3.1 数据格式规范
 
 本规范描述 PANO 正式版书库、书籍、标注与本机配置的持久化格式。实现代码位于
 `src/storage/`、`src/library/`、`src/settings/` 和 `src/annotation/`。
@@ -6,8 +6,9 @@
 ## 1. 通用约定
 
 - 所有文本文件为 UTF-8 编码的 JSON，带缩进和末尾换行，便于人工检查与版本管理。
-- 每个文件都有 `format` 字段标识用途，并有 `schema_version`。Phase 1 只接受版本 `1`；
-  未知版本或未知 `format` 必须拒绝写入，不能猜测或静默转换。
+- 每个文件都有 `format` 字段标识用途，并有 `schema_version`。当前 `annotations.json`
+  使用版本 `2`，其余书库文件使用版本 `1`；未知版本或未知 `format` 必须拒绝写入，
+  不能猜测、迁移或静默转换。
 - 写入使用 `QSaveFile` 的提交语义，避免半写入文件。书库级索引写入前还会检查文件是否
   在本次打开后被外部修改。
 - 书库目录以 `.pano.lock` 做单实例保护；锁只保护写入，不改变 PDF 源文件。
@@ -125,12 +126,16 @@
 - 删除书架只删除书架及其成员关系，不删除书籍文件或书籍索引；子书架上移到被删书架
   的父级。
 
-## 6. `annotations.json`
+## 6. `annotations.json`（schema 2）
+
+Phase 3.1 起，标注与笔记分开存储：标注只描述页面几何与样式，笔记是拥有稳定 ID 的独立
+对象，可放在书库根或笔记树分组下，并可选地关联一个标注。一个标注最多关联一条笔记，
+一条笔记最多关联一个标注。
 
 ```json
 {
   "format": "pano-annotations",
-  "schema_version": 1,
+  "schema_version": 2,
   "book_id": "0e9b4d3a-6f6f-4c86-9d5c-1f0b2f46f1a1",
   "annotations": [
     {
@@ -150,11 +155,30 @@
       "z_order": 0
     }
   ],
-  "note_tree": []
+  "notes": [
+    {
+      "id": "6b0ab10f-8525-4fc8-9eff-4f66d48b1ba2",
+      "title": "阅读笔记",
+      "markdown": "## 标题\n\n正文",
+      "annotation_id": "d1f0d0a4-3a94-4d7a-9a1b-4f1b7f0f2b11",
+      "created_at": "2026-11-27T08:36:00.000Z",
+      "modified_at": "2026-11-27T08:36:00.000Z"
+    }
+  ],
+  "note_tree": [
+    {
+      "type": "group",
+      "id": "a3d7d1c9-6f2c-4f4c-8c31-f0f0a3e7a111",
+      "title": "论文",
+      "children": [
+        {"type": "note", "note_id": "6b0ab10f-8525-4fc8-9eff-4f66d48b1ba2"}
+      ]
+    }
+  ]
 }
 ```
 
-### 6.1 类型与几何
+### 6.1 标注类型与几何
 
 | `type` | 含义 | `geometry` 必填字段 |
 | --- | --- | --- |
@@ -174,9 +198,10 @@
   命中和定位时由 `TextSelectionGeometry` 在内存中按行合并，避免把词间距误判为永久
   几何。
 - `points`、`polygons` 中每个点为 `[x, y]`。
-- 不再保存重复的 `rect`；矩形由几何字段推导，避免同一坐标出现两个权威来源。
-- 兼容读取旧字段别名：`highlight`、`text_underline`、`text_strikeout`、
-  `strike_out`、`note`、`excerpt`、`p1`/`p2`；正式写入只使用上表名称。
+- 不保存重复的 `rect`；矩形由几何字段推导，避免同一坐标出现两个权威来源。
+- 兼容读取旧几何别名：`highlight`、`text_underline`、`text_strikeout`、
+  `strike_out`、`excerpt`、`p1`/`p2`；正式写入只使用上表名称。
+- 标注对象不再包含 `note` 字段；旧数据中的 `note` 不会被自动迁移。
 
 ### 6.2 样式
 
@@ -190,21 +215,41 @@
 - `stroke_enabled`：可选布尔值，默认 `true`；仅当为 `false` 时写入，表示不描边
   （填充仍可保留）。
 
-### 6.3 笔记
+`z_order` 为同页绘制顺序，数组顺序与创建顺序一致；缺少时按 0 读取。
 
-标注可带附加笔记：
+### 6.3 笔记对象
 
-```json
-"note": {"title": "阅读笔记", "markdown": "## 标题\n\n正文"}
-```
+- `id`：必填，UUID 字符串，全书库内稳定；编辑正文不改变 ID。
+- `title`：必填显示标题；允许空正文，标题为空时实现层显示为 `未命名笔记`，写入时
+  规范化为该默认标题。
+- `markdown`：Markdown 正文，可为空字符串；相对图片路径仍相对于书籍目录下的
+  `assets/`。
+- `annotation_id`：`null` 或字符串。非空时必须指向同一本书内存在的标注 ID，并且该
+  标注最多被一条笔记引用。
+- `notes` 中每条笔记必须唯一；`note_tree` 必须引用存在的笔记且每条笔记恰好出现一次。
+- 独立笔记不包含页面、坐标或样式副本；笔记与标注的关联只保存 `annotation_id`。
 
-没有笔记时省略 `note`（等价于空笔记）。笔记 Markdown 中的相对图片路径相对于书籍
-目录下的 `assets/`；图片文件与标注 JSON 一起保存。
+### 6.4 笔记树
 
-`z_order` 为同页绘制顺序，数组顺序与创建顺序一致；Phase 1 写入该字段，读取旧数据时
-缺省为 0。
+- `note_tree` 是嵌套数组，顶层与每个 `children` 数组的顺序即同级显示顺序。
+- 分组节点：`{"type":"group","id":"<UUID>","title":"<显示名>","children":[...]}`。
+  分组不包含正文或标注关联，可嵌套；分组 ID 必须唯一，不允许循环。
+- 笔记叶子：`{"type":"note","note_id":"<笔记 ID>"}`。叶子顺序决定同级顺序。
+- 根节点不落盘；空 `note_tree` 表示没有分组或笔记。
+- 实现限制：最大深度 32、最多 10000 个节点；超限拒绝写入。
+- 删除分组时默认把直接子节点提升到父级并保留顺序；整棵子树删除需要显式确认。
 
-`note_tree` 为保留字段，当前为空数组；笔记正文存放在标注的 `note` 中。
+### 6.5 校验与兼容
+
+- 打开时校验 `format`、`schema_version == 2`、`book_id`、标注 ID 唯一、笔记 ID 唯一、
+  笔记关联目标存在且一对一、树引用存在且无重复/循环、每条笔记恰好出现一次。
+- 任一校验失败必须拒绝本次加载并保留原文件，不得写回空模型或部分数据。
+- `schema_version` 为 1 或未知值时拒绝读取，错误信息说明需要 `schema_version 2`；
+  不自动迁移、不写兼容字段。旧书库需在新测试书库中重新建立数据。
+- 笔记、树、关联的修改与标注修改共用同一保存事务：外部修改指纹不一致时拒绝覆盖；
+  `QSaveFile` 原子写入失败时保留内存中的未保存状态。
+- 书库统计的 `note_count` 取 `notes` 数组长度，`annotation_count` 取 `annotations`
+  数组长度。
 
 ## 7. 阅读状态与历史
 

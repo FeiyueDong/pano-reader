@@ -127,7 +127,7 @@ public:
     void deleteSelected();
     void applyStyleToSelected(const AnnotationStyle &style);
     void applyStyleToAnnotation(const QString &annotationId, const AnnotationStyle &style);
-    void setAnnotationNote(const QString &annotationId, const AnnotationNote &note);
+    void setNoteQuery(std::function<bool(const QString &)> query);
     void setSelectionOverlayVisible(bool visible);
     void copySelectedText();
 
@@ -280,6 +280,7 @@ private:
     QPointF m_dragCurrentPage;
     QPointF m_dragStartView;
     QPointF m_handLastView;
+    std::function<bool(const QString &)> m_noteQuery;
     QPointF m_dragLastPage;
     int m_resizeHandle = -1;
     bool m_dragMoved = false;

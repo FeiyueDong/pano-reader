@@ -150,12 +150,11 @@ QVector<BookInfo> LibraryManager::books(bool includeDeleted) const
             info.sourceError = sourceError.isEmpty() ? QStringLiteral("源 PDF 不存在或不可读。") : sourceError;
 
         QJsonArray annotations;
-        if (m_store->readAnnotations(record.directory, record.id, &annotations, nullptr)) {
+        QJsonArray notes;
+        QJsonArray noteTree;
+        if (m_store->readReadingData(record.directory, record.id, &annotations, &notes, &noteTree, nullptr)) {
             info.annotationCount = annotations.size();
-            for (const QJsonValue &value : annotations) {
-                if (value.isObject() && !value.toObject().value(QStringLiteral("note")).toObject().isEmpty())
-                    ++info.noteCount;
-            }
+            info.noteCount = notes.size();
         }
         result.append(info);
     }

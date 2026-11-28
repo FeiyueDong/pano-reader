@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-root="$(cd "$(dirname "$0")/.." && pwd)"
-deps="$root/build/deps"
+demo_root="$(cd "$(dirname "$0")/.." && pwd)"
+repo_root="$(cd "$demo_root/../.." && pwd)"
+deps="${PANO_MARKDOWN_DEPS:-$repo_root/build/deps}"
 pkg="$deps/jkqtplotter.pkg.tar.zst"
 out="$deps/jkqt"
 
@@ -27,3 +28,4 @@ curl -L --fail -o "$pkg" "$url"
 mkdir -p "$out"
 tar --zstd -xf "$pkg" -C "$out"
 echo "JKQTMathText 已解压到 $out"
+echo "依赖目录：$out（根构建默认使用该路径；也可设置 JKQT_ROOT）"

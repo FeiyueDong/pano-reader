@@ -1,12 +1,16 @@
 #pragma once
 
 #include <QByteArray>
+#include <functional>
 #include <QObject>
 #include <QPointF>
 #include <QString>
 
+#include "annotation/Annotation.h"
 #include "library/LibraryTypes.h"
 #include "document/BookmarkStore.h"
+#include "note/NoteModel.h"
+#include "note/NoteTree.h"
 
 class QTimer;
 
@@ -45,6 +49,34 @@ public:
     ToolPresets *toolPresets() const;
     BookmarkStore *bookmarks() { return &m_bookmarkStore; }
     bool saveBookmarks(QString *errorMessage = nullptr);
+
+    NoteModel *notes() { return &m_notes; }
+    const NoteModel *notes() const { return &m_notes; }
+    NoteTree &noteTree() { return m_noteTree; }
+    const NoteTree &noteTree() const { return m_noteTree; }
+    const Note *noteForAnnotation(const QString &annotationId) const;
+    const Annotation *annotationForNote(const QString &noteId) const;
+    bool hasLinkedNote(const QString &annotationId) const;
+    const Note *note(const QString &noteId) const;
+
+    bool createNote(Note note, const QString &parentGroupId, QString *noteId,
+                    QString *errorMessage);
+    bool updateNote(const Note &note, QString *errorMessage);
+    bool deleteNote(const QString &noteId, bool removeNotePoint, QString *errorMessage);
+    bool deleteAnnotationKeepingNote(const QString &annotationId, QString *errorMessage);
+    bool linkNoteToAnnotation(const QString &noteId, const QString &annotationId,
+                              QString *errorMessage);
+    bool unlinkNote(const QString &noteId, QString *errorMessage);
+    bool createGroup(const QString &parentGroupId, const QString &title, QString *groupId,
+                     QString *errorMessage);
+    bool renameGroup(const QString &groupId, const QString &title, QString *errorMessage);
+    bool moveTreeNode(const QString &nodeId, const QString &newParentId, QString *errorMessage);
+    bool moveTreeNodeUp(const QString &nodeId, QString *errorMessage);
+    bool moveTreeNodeDown(const QString &nodeId, QString *errorMessage);
+    bool deleteGroup(const QString &groupId, bool promoteChildren, QString *errorMessage);
+    void restoreReadingSnapshot(const QVector<Annotation> &annotations,
+                                const QVector<Note> &notes, const NoteTree &tree);
+    void notifyReadingDataChanged();
     QString assetsDirectory() const;
     QString bookDirectory() const;
 
@@ -62,6 +94,7 @@ signals:
     void titleChanged(const QString &title);
     void statusMessage(const QString &message);
     void saveFailed(const QString &message);
+    void readingDataChanged();
 
 private slots:
     void markDirty();
@@ -73,6 +106,7 @@ private slots:
     void scheduleReadingSave();
 
 private:
+    bool commitReadingEdit(const QString &undoText, const std::function<bool(QString *)> &mutation, QString *errorMessage);
     void captureReadingState();
     void saveReadingState();
     QByteArray annotationsFingerprint() const;
@@ -93,6 +127,9 @@ private:
     int m_autosaveDelayMs = 2000;
     QByteArray m_annotationsFingerprint;
     BookmarkStore m_bookmarkStore;
+    NoteModel m_notes;
+    NoteTree m_noteTree;
+    bool m_restoringReadingData = false;
 };
 
 } // namespace pano

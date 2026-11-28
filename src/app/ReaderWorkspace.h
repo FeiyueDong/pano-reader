@@ -3,6 +3,7 @@
 #include <QHash>
 #include <QList>
 #include <QWidget>
+#include <QPoint>
 
 #include "annotation/Annotation.h"
 #include "reader/PdfView.h"
@@ -27,11 +28,14 @@ class QToolButton;
 class QTreeView;
 class QSplitter;
 class QPdfBookmarkModel;
+class QTreeWidget;
+class QTreeWidgetItem;
 
 namespace pano {
 
 class DocumentSession;
-class NotePanel;
+class NoteEditDialog;
+class MarkdownPreview;
 class PageRenderer;
 class RegionCaptureOverlay;
 
@@ -50,17 +54,17 @@ public:
     void changeEvent(QEvent *event) override;
 
     PdfView *view() const { return m_view; }
-    NotePanel *notePanel() const { return m_notePanel; }
     DocumentSession *session() const { return m_session; }
 
     bool isEditingNote() const;
     void beginNoteEdit();
     void commitNoteEdit();
     void cancelNoteEdit();
-    void commitPendingNote();
+    bool commitPendingNote(QString *errorMessage = nullptr);
     void insertImageIntoNote();
     void startRegionCapture();
     void refreshAll();
+    void refreshReadingData();
     void flushPendingStyle();
     void reloadToolPreset();
     void setFullscreenMode(bool fullscreen);
@@ -143,6 +147,7 @@ private:
     QWidget *buildSearchBar();
     QWidget *buildBookmarkTab();
     QWidget *buildAnnotationTab();
+    QWidget *buildNoteTab();
     QWidget *buildLeftDock();
     QWidget *buildRightDock();
     QWidget *buildDetailPane();
@@ -161,15 +166,28 @@ private:
     void updateToolActions();
     void updateContextToolBar();
     void updateContextBarHeight();
-    QString noteTitleFor(const Annotation &annotation) const;
-    void markNoteDirty();
-    void stopNoteTimers();
-    void setEditingAnnotation(const QString &id);
+    void refreshNoteTree();
+    void updateNotePreview();
+    void openNoteForAnnotation(const QString &annotationId);
+    void openNoteEditor(const QString &noteId);
+    void createIndependentNote(const QString &parentGroupId = QString());
+    void createGroupUnder(const QString &parentGroupId = QString());
+    void renameSelectedNoteNode();
+    void moveSelectedNoteNode();
+    void deleteSelectedNoteNode();
+    void showNoteContextMenu(const QPoint &pos);
+    QString selectedNoteNodeId() const;
+    QString selectedParentGroupId() const;
     void showStatus(const QString &text);
 
     DocumentSession *m_session = nullptr;
     PdfView *m_view = nullptr;
-    NotePanel *m_notePanel = nullptr;
+    NoteEditDialog *m_noteDialog = nullptr;
+    QTreeWidget *m_noteTreeWidget = nullptr;
+    MarkdownPreview *m_notePreview = nullptr;
+    QLabel *m_noteInfoLabel = nullptr;
+    QString m_pendingNoteAnnotationId;
+    bool m_pendingNoteAnnotationIsNew = false;
     RegionCaptureOverlay *m_captureOverlay = nullptr;
     QWidget *m_textFloat = nullptr;
     QWidget *m_regionFloat = nullptr;
@@ -266,8 +284,6 @@ private:
 
     QTimer *m_styleTimer = nullptr;
     QTimer *m_presetTimer = nullptr;
-    QTimer *m_noteTimer = nullptr;
-    QTimer *m_noteMaxTimer = nullptr;
     QTimer *m_panelSaveTimer = nullptr;
     QTimer *m_statusTimer = nullptr;
     QTimer *m_searchTimer = nullptr;
@@ -279,7 +295,6 @@ private:
     QListWidget *m_searchResults = nullptr;
     QHash<int, QVector<QRectF>> m_searchHighlightRects;
 
-    QString m_editingId;
     QString m_styleTargetId;
     QString m_styleTargetTool;
     AnnotationStyle m_styleSnapshot;
@@ -289,8 +304,6 @@ private:
     bool m_applyingSelection = false;
     bool m_syncingControls = false;
     bool m_syncingTool = false;
-    bool m_noteDirty = false;
-    bool m_noteMaxStarted = false;
     bool m_fullscreen = false;
     QList<int> m_fullscreenSplitterSizes;
     bool m_fullscreenLeftVisible = true;

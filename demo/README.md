@@ -28,31 +28,35 @@ Windows 目标已列入计划，但尚未在本阶段实际构建验证。高 DP
 
 ## 构建
 
-Qt PDF 必须来自同一套 Qt 安装，不要混用系统 Qt 与 SDK 的 QtPdf。使用 xmake 的 Qt 支持：
+Phase 3.1 起使用根目录唯一构建入口，本目录不再是独立 xmake 工程：
 
 ```bash
-xmake f -c -m debug --qt=/home/yue/Qt/6.12.0/gcc_64
-xmake -j4
+# 在仓库根目录
+xmake f -c -m debug --qt=/home/yue/Qt/6.12.0/gcc_64 \
+  --build_demo=y --build_markdown_demo=n
+xmake build -j4 pano-demo-reader
 ```
 
-若 `qmake` 已在 `PATH` 中，也可以只执行 `xmake f -c -m debug`。项目会为 Linux 可执行文件设置 Qt SDK 的 rpath；若移动 Qt 安装位置，需要重新配置。
-
-产物：
+旧 Demo 的目标统一加 `pano-demo-` 前缀；本目录的 `xmake.lua` 只由根工程按
+`--build_demo=y` 包含。产物：
 
 ```text
-build/linux/x86_64/debug/pano-reader
+build/linux/x86_64/debug/pano-demo-reader
 ```
+
+关闭 Demo 时重新配置 `--build_demo=n`。本目录的 `xmake.lua` 不能再用 `xmake -P demo`
+作为正式入口。
 
 ## 启动
 
 ```bash
-./build/linux/x86_64/debug/pano-reader examples/sample-paper.pdf
+./build/linux/x86_64/debug/pano-demo-reader demo/examples/sample-paper.pdf
 ```
 
 也可以先启动再通过工具栏“打开 PDF”选择文件：
 
 ```bash
-./build/linux/x86_64/debug/pano-reader
+./build/linux/x86_64/debug/pano-demo-reader
 ```
 
 ## 使用

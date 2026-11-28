@@ -26,7 +26,7 @@ Markdown (UTF-8)
 | Qt | 6.12.0（SDK `/home/yue/Qt/6.12.0/gcc_64`） | Widgets；系统另有 6.12.1 |
 | MD4C | 0.6.0-2 | `md4c` / `md4c-html` |
 | JKQTPlotter | 5.0.0git20251013-2 (Arch) | 仅链接 `JKQTMathText`、`JKQTCommon` 动态库 |
-| xmake | 3.1.2 | 独立工程 `${PROJECT}/build` |
+| xmake | 3.1.2 | 根工程统一入口 |
 | g++ | 16.2.1 | C++20 |
 
 JKQT 包是用系统 Qt 6.12.1 构建的，本次演示实际加载 SDK Qt 6.12.0；Qt 6.12.x 间 ABI 兼容已实测可运行，但正式集成仍应保持构建与运行 Qt 小版本一致。
@@ -35,7 +35,7 @@ JKQT 包是用系统 Qt 6.12.1 构建的，本次演示实际加载 SDK Qt 6.12.
 
 ```
 demo/markdown/
-├── xmake.lua                 # 独立 demo 工程（target: pano-markdown-demo）
+├── xmake.lua                 # 根工程 include 的局部 target 定义
 ├── tools/fetch-deps.sh       # 下载并解压 JKQTMathText（Arch 包）
 ├── src/
 │   ├── main.cpp
@@ -50,32 +50,34 @@ demo/markdown/
 
 ## 构建
 
-### 方式 A：使用脚本准备依赖（推荐）
+Phase 3.1 起，仓库根目录 `xmake.lua` 是唯一构建入口。Demo 不再是独立项目，也不再使用
+`xmake -P .`；它由根工程选项按需包含。
 
 ```bash
-cd demo/markdown
-./tools/fetch-deps.sh
-xmake f -P . -c -m debug
-xmake -P . -j4
+# 在仓库根目录
+./demo/markdown/tools/fetch-deps.sh
+xmake f -c -m debug --qt=/home/yue/Qt/6.12.0/gcc_64 \
+  --build_demo=n --build_markdown_demo=y
+xmake build -j4 pano-markdown-demo
 ```
 
-脚本默认把依赖解压到 `build/deps/jkqt/usr`。非 Arch 系统可通过 `JKQT_PKG_URL` 指定可解压的 JKQTPlotter 包；脚本只处理 `jkqtmathtext` 所需文件，不做系统安装。
-
-### 方式 B：已有 JKQT 前缀
+脚本默认把依赖解压到仓库根 `build/deps/jkqt/usr`。非 Arch 系统可通过 `JKQT_PKG_URL`
+指定可解压的 JKQTPlotter 包；脚本只处理 `jkqtmathtext` 所需文件，不做系统安装。
+如已有 JKQT 前缀，可跳过脚本并设置 `JKQT_ROOT`（目录应包含
+`include/jkqtmathtext/` 和 `lib/libJKQTMathText6_RelWithDebInfo.so`）：
 
 ```bash
-cd demo/markdown
-JKQT_ROOT=/path/to/jkqt/usr xmake f -P . -c -m debug
-JKQT_ROOT=/path/to/jkqt/usr xmake -P . -j4
+JKQT_ROOT=/path/to/jkqt/usr xmake f -c -m debug --qt=/path/to/Qt/6.x.y/gcc_64 \
+  --build_demo=n --build_markdown_demo=y
+xmake build -j4 pano-markdown-demo
 ```
 
-`JKQT_ROOT` 目录应包含 `include/jkqtmathtext/` 和 `lib/libJKQTMathText6_RelWithDebInfo.so`。本仓库验证时使用的是：
+切换 Demo 选项后建议使用 `xmake f -c` 重新配置，避免旧 target 缓存残留。关闭时：
 
 ```bash
-JKQT_ROOT=/mnt/workspace/CodeFiles/Tools/pano-reader/build/phase3-deps/jkqt/usr
+xmake f -c -m debug --qt=/path/to/Qt/6.x.y/gcc_64 \
+  --build_demo=n --build_markdown_demo=n
 ```
-
-> 注意：必须使用 `-P .` 指定 demo 工程；直接在 `demo/markdown` 下运行 `xmake` 可能被解析到根工程。
 
 可执行文件：
 

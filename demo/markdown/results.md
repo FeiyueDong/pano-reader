@@ -5,7 +5,7 @@
 - Qt：6.12.0 SDK（`/home/yue/Qt/6.12.0/gcc_64`）
 - MD4C：0.6.0-2
 - JKQTPlotter：5.0.0git20251013-2（LGPL-2.1-or-later，动态链接）
-- 工程：`demo/markdown/` 独立 xmake 工程，target `pano-markdown-demo`
+- 工程：`demo/markdown/`，target `pano-markdown-demo`（以下 `-P` 命令为 Phase 3.0 历史记录；Phase 3.1 起由根 `xmake.lua` 统一包含）
 
 ## 构建与运行
 
