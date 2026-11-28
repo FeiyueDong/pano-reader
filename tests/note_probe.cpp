@@ -11,9 +11,12 @@
 #include <QTemporaryDir>
 #include <QTreeWidget>
 #include <QComboBox>
+#include <QBuffer>
 #include <QClipboard>
 #include <QMimeData>
 #include <QPlainTextEdit>
+#include <QLineEdit>
+#include <QPushButton>
 #include <QImage>
 #include <QTabWidget>
 #include <cstdio>
@@ -82,6 +85,7 @@ int main(int argc, char **argv)
     annotation.pageIndex = 0;
     annotation.type = pano::AnnotationType::Rectangle;
     annotation.rect = QRectF(80, 120, 240, 70);
+    annotation.text = QStringLiteral("摘录内容 $x$");
     view->undoStack()->push(new pano::AddAnnotationCommand(view->annotations(), annotation));
     check(view->annotations()->find(annotation.id) != nullptr, "annotation added");
 
@@ -115,6 +119,55 @@ int main(int argc, char **argv)
     check(!session.createNote(duplicate, QString(), &duplicateId, &error),
           "one-to-one link rejected");
 
+    // Bidirectional link API: one note, one annotation, explicit unlink.
+    pano::Annotation second;
+    second.id = pano::newAnnotationId();
+    second.pageIndex = 0;
+    second.type = pano::AnnotationType::Ellipse;
+    second.rect = QRectF(500, 200, 80, 60);
+    view->undoStack()->push(new pano::AddAnnotationCommand(view->annotations(), second));
+    check(session.linkNoteToAnnotation(independentId, second.id, &error),
+          "link independent note to annotation");
+    check(session.noteForAnnotation(second.id) != nullptr, "reverse link available");
+    check(!session.linkNoteToAnnotation(independentId, annotation.id, &error),
+          "linked note cannot be linked twice");
+    check(session.unlinkNote(independentId, &error), "unlink note");
+    check(session.noteForAnnotation(second.id) == nullptr, "unlink clears reverse link");
+    check(session.deleteAnnotationAndNote(second.id, &error), "delete temporary annotation");
+
+    // R05/R12: depth checks cover the whole moved subtree, not just one node;
+    // sibling groups remain addressable by ID even with identical names.
+    {
+        pano::NoteTree tree;
+        QString parent;
+        bool built = true;
+        for (int depth = 0; depth < 31; ++depth) {
+            QString child;
+            if (!tree.addGroup(parent, QStringLiteral("层级%1").arg(depth + 1), &child, &error)) {
+                built = false;
+                break;
+            }
+            parent = child;
+        }
+        check(built, "tree builds 31 nested groups");
+        QString topLevel;
+        for (const pano::NoteTreeNode &node : tree.nodes()) {
+            if (node.type == pano::NoteNodeType::Group && node.parentId.isEmpty()) {
+                topLevel = node.id;
+                break;
+            }
+        }
+        check(!topLevel.isEmpty(), "nested tree has a root group");
+        check(!tree.moveNode(topLevel, parent, &error),
+              "move rejects subtree exceeding depth");
+        QString sameA;
+        QString sameB;
+        check(tree.addGroup(QString(), QStringLiteral("同名"), &sameA, &error), "same-name group A");
+        check(tree.addGroup(QString(), QStringLiteral("同名"), &sameB, &error), "same-name group B");
+        check(tree.moveNode(sameA, sameB, &error), "move chooses target by id");
+        check(tree.parentOf(sameA) == sameB, "same-name move hits exact parent");
+    }
+
     check(session.moveTreeNode(independentId, groupB, &error), "move note into group");
     check(session.moveTreeNodeUp(independentId, &error), "move note up");
 
@@ -138,6 +191,8 @@ int main(int argc, char **argv)
     view->undoStack()->undo();
     check(session.noteForAnnotation(annotation.id) != nullptr, "undo restores link");
     view->undoStack()->redo();
+    view->undoStack()->undo(); // restore annotation and link for later checks
+    check(session.noteForAnnotation(annotation.id) != nullptr, "annotation/link restored for tests");
 
     // note-point deletion removes its dedicated annotation.
     pano::Annotation point;
@@ -159,6 +214,10 @@ int main(int argc, char **argv)
     check(view->annotations()->find(point.id) != nullptr, "undo restores point");
     view->undoStack()->undo(); // remove point again
     check(session.saveNow(&error), "save after edits");
+    QFile latestFile(annotationsPath);
+    check(latestFile.open(QIODevice::ReadOnly), "read latest reading data");
+    const QByteArray latestSaved = latestFile.readAll();
+    latestFile.close();
 
     session.flush();
 
@@ -179,7 +238,7 @@ int main(int argc, char **argv)
     }
     QFile restore(annotationsPath);
     check(restore.open(QIODevice::WriteOnly | QIODevice::Truncate), "restore schema 2");
-    restore.write(saved);
+    restore.write(latestSaved);
     restore.close();
 
     // Reopen and verify the tree/notes round-trip.
@@ -192,8 +251,198 @@ int main(int argc, char **argv)
         check(reopened.noteForAnnotation(annotation.id) != nullptr, "reopen link");
     }
 
+    // R02: a note draft is written before any model is published, and a failed
+    // write keeps both the note model and the file untouched.
+    {
+        const int beforeNotes = session.notes()->size();
+        pano::NoteDraft draft;
+        draft.noteId = pano::newNoteId();
+        draft.title = QStringLiteral("空白笔记示例");
+        draft.markdown = QString();
+        draft.parentGroupId = groupA;
+        draft.isNew = true;
+        QString committed;
+        check(session.commitNoteDraft(draft, &committed, &error), "draft note commits atomically");
+        check(session.notes()->size() == beforeNotes + 1, "draft note published after write");
+        check(session.note(committed) && session.note(committed)->markdown.isEmpty(),
+              "empty draft body persists");
+        QFile draftFile(annotationsPath);
+        check(draftFile.open(QIODevice::ReadOnly), "read committed draft");
+        const QByteArray afterDraftBytes = draftFile.readAll();
+        draftFile.close();
+
+        QFile tampered(annotationsPath);
+        check(tampered.open(QIODevice::Append), "tamper reading data");
+        tampered.write(" ");
+        tampered.close();
+        pano::NoteDraft failedDraft = draft;
+        failedDraft.noteId = pano::newNoteId();
+        failedDraft.title = QStringLiteral("外部冲突草稿");
+        const int afterFirst = session.notes()->size();
+        check(!session.commitNoteDraft(failedDraft, &committed, &error),
+              "external change rejects draft");
+        check(session.notes()->size() == afterFirst, "failed draft not published");
+        check(session.note(failedDraft.noteId) == nullptr, "failed draft absent from model");
+        QFile unchanged(annotationsPath);
+        check(unchanged.open(QIODevice::ReadOnly), "read unchanged file");
+        check(unchanged.readAll() == afterDraftBytes + QByteArray(" "), "failed draft does not overwrite");
+        unchanged.close();
+        QFile restoreCurrent(annotationsPath);
+        check(restoreCurrent.open(QIODevice::WriteOnly | QIODevice::Truncate),
+              "restore current reading data");
+        restoreCurrent.write(afterDraftBytes);
+        restoreCurrent.close();
+    }
+
+    // R04/R05: note-point creation and note+annotation deletion are one commit.
+    {
+        const int beforeAnnotations = view->annotations()->annotations().size();
+        const int beforeNotes = session.notes()->size();
+        pano::NoteDraft pointDraft;
+        pointDraft.noteId = pano::newNoteId();
+        pointDraft.title = QStringLiteral("笔记点示例");
+        pointDraft.markdown = QStringLiteral("正文");
+        pointDraft.parentGroupId = groupA;
+        pointDraft.isNew = true;
+        pointDraft.createNotePoint = true;
+        pointDraft.pageIndex = 0;
+        pointDraft.pagePoint = QPointF(320, 360);
+        pano::AnnotationStyle pointStyle;
+        pointStyle.strokeColor = QColor(QStringLiteral("#f59e0b"));
+        pointDraft.notePointStyle = pointStyle;
+        QString pointNoteId;
+        check(session.commitNoteDraft(pointDraft, &pointNoteId, &error),
+              "note point and note commit together");
+        check(session.notes()->size() == beforeNotes + 1, "note point note added");
+        check(view->annotations()->annotations().size() == beforeAnnotations + 1,
+              "note point annotation added");
+        const pano::Note *pointNote = session.note(pointNoteId);
+        check(pointNote && !pointNote->annotationId.isEmpty(), "note point linked");
+        const QString pointAnnotationId = pointNote->annotationId;
+        check(session.deleteAnnotationAndNote(pointAnnotationId, &error),
+              "delete annotation and note atomically");
+        check(view->annotations()->find(pointAnnotationId) == nullptr, "point removed");
+        check(session.note(pointNoteId) == nullptr, "note removed");
+        view->undoStack()->undo();
+        check(view->annotations()->find(pointAnnotationId) != nullptr, "undo restores annotation");
+        check(session.note(pointNoteId) != nullptr, "undo restores note");
+        check(session.deleteAnnotationAndNote(pointAnnotationId, &error),
+              "delete note point sample after undo");
+    }
+
+    // R02/R10: drafts carry assets, and cancel removes only uncommitted assets.
+    {
+        pano::NoteEditDialog dialog(&session, nullptr);
+        dialog.openNewNoteAtPoint(groupA, 0, QPointF(360, 380), pano::AnnotationStyle());
+        const QString assetsDir = session.bookDirectory() + QStringLiteral("/assets");
+        const int beforeNotes = session.notes()->size();
+        const int beforeAnnotations = view->annotations()->annotations().size();
+        QImage image(24, 24, QImage::Format_ARGB32_Premultiplied);
+        image.fill(QColor(QStringLiteral("#336699")));
+        QByteArray bytes;
+        QBuffer buffer(&bytes);
+        buffer.open(QIODevice::WriteOnly);
+        image.save(&buffer, "PNG");
+        QString relative;
+        check(session.writeAsset(QStringLiteral("image"), QStringLiteral("png"), bytes, &relative, &error),
+              "draft asset written");
+        dialog.insertAssetMarkdown(relative, QStringLiteral("草稿图"));
+        dialog.reject();
+        check(session.notes()->size() == beforeNotes, "cancelled note not published");
+        check(view->annotations()->annotations().size() == beforeAnnotations,
+              "cancelled note point not published");
+        check(!QFileInfo::exists(session.bookDirectory() + QLatin1Char('/') + relative),
+              "cancelled draft asset removed");
+    }
+
+    // R01/R02: the editor saves through the same atomic session commit; a
+    // successful save is visible in both the model and annotations.json.
+    {
+        const int beforeNotes = session.notes()->size();
+        pano::NoteEditDialog dialog(&session, nullptr);
+        dialog.openNewNote(groupA);
+        auto *titleEdit = dialog.findChild<QLineEdit *>();
+        auto *editor = dialog.findChild<QPlainTextEdit *>();
+        check(titleEdit && editor, "draft save widgets");
+        if (titleEdit && editor) {
+            titleEdit->setText(QStringLiteral("草稿保存示例"));
+            editor->setPlainText(QStringLiteral("## 已保存\n\n保存后应立即可见。"));
+            QString saveError;
+            check(dialog.commitIfDirty(&saveError), "editor draft saves");
+            check(session.notes()->size() == beforeNotes + 1, "editor save publishes note");
+            const QString noteId = dialog.currentNoteId();
+            const pano::Note *savedNote = session.note(noteId);
+            check(savedNote && savedNote->markdown.contains(QStringLiteral("已保存")),
+                  "editor save content persisted");
+            QFile checkFile(annotationsPath);
+            check(checkFile.open(QIODevice::ReadOnly), "read saved draft file");
+            const QJsonObject checkRoot = QJsonDocument::fromJson(checkFile.readAll()).object();
+            bool inFile = false;
+            for (const QJsonValue &value : checkRoot.value(QStringLiteral("notes")).toArray()) {
+                if (value.toObject().value(QStringLiteral("id")).toString() == noteId)
+                    inFile = true;
+            }
+            check(inFile, "editor save written before publish");
+            const pano::Note *unchanged = session.note(noteId);
+            const int undoBefore = view->undoStack()->count();
+            pano::NoteDraft same;
+            same.noteId = noteId;
+            same.title = unchanged->title;
+            same.markdown = unchanged->markdown;
+            same.annotationId = unchanged->annotationId;
+            QString sameError;
+            check(session.commitNoteDraft(same, nullptr, &sameError), "no-change draft save succeeds");
+            check(view->undoStack()->count() == undoBefore, "no-change save adds no undo command");
+            check(session.notes()->size() == beforeNotes + 1, "no-change save does not duplicate");
+        }
+        dialog.reject();
+    }
+
+    // R08/R09: excerpt is not erased by header refresh; one render serves the preview.
+    {
+        pano::NoteEditDialog dialog(&session, nullptr);
+        dialog.openNewNote(groupA, annotation.id);
+        auto *editor = dialog.findChild<QPlainTextEdit *>();
+        check(editor && editor->toPlainText().startsWith(QStringLiteral(">")),
+              "new note keeps escaped excerpt");
+        check(editor && editor->toPlainText().contains(QStringLiteral("摘录内容")),
+              "excerpt content retained");
+        dialog.reject();
+    }
+
+    // R07: traversal, symlink escape and external paths are blocked.
+    {
+        const pano::MarkdownRenderResult traversal =
+            pano::MarkdownRenderer::render(QStringLiteral("![x](../../outside.png)"),
+                                           session.bookDirectory(), 11.0, QColor(Qt::black));
+        check(traversal.missingImages >= 1, "image traversal blocked");
+        check(!traversal.warnings.isEmpty(), "image traversal reports warning");
+
+        const QString linkPath = session.bookDirectory() + QStringLiteral("/assets/escape.png");
+        QFile::remove(linkPath);
+        if (QFile::link(QStringLiteral("/etc/hostname"), linkPath)) {
+            const pano::MarkdownRenderResult symlink =
+                pano::MarkdownRenderer::render(QStringLiteral("![x](assets/escape.png)"),
+                                               session.bookDirectory(), 11.0, QColor(Qt::black));
+            check(symlink.missingImages >= 1, "symlink escape blocked");
+            QFile::remove(linkPath);
+        }
+    }
+
     // Visual evidence for the tree and editor.
     auto *workspace = session.workspace();
+    // R03/R07: export must not overwrite and the same target stays stable.
+    {
+        const QString exportPath = QDir(root).filePath(QStringLiteral("exports/no-overwrite.md"));
+        QFile::remove(exportPath);
+        QDir().mkpath(QFileInfo(exportPath).absolutePath());
+        workspace->exportNoteMarkdown(linkedId, exportPath, &error);
+        check(QFileInfo::exists(exportPath), "export created file");
+        error.clear();
+        workspace->exportNoteMarkdown(linkedId, exportPath, &error);
+        check(!error.isEmpty(), "export refuses overwrite");
+    }
+
     workspace->resize(1440, 900);
     workspace->show();
     waitFor(400);
@@ -204,6 +453,12 @@ int main(int argc, char **argv)
         }
     }
     if (auto *tree = workspace->findChild<QTreeWidget *>()) {
+        check(tree->topLevelItemCount() == 1, "note tree has one virtual book root");
+        QTreeWidgetItem *rootItem = tree->topLevelItem(0);
+        check(rootItem && !(rootItem->flags() & Qt::ItemIsEditable),
+              "book root is not editable");
+        check(rootItem && rootItem->data(0, Qt::UserRole).toString().isEmpty(),
+              "book root has no persisted node id");
         QTreeWidgetItemIterator it(tree);
         while (*it) {
             if ((*it)->text(0).contains(QStringLiteral("关联笔记"))) {
@@ -226,13 +481,20 @@ int main(int argc, char **argv)
         auto *editor = noteDialog->findChild<QPlainTextEdit *>();
         check(modeCombo && editor, "editor mode and source widgets");
         if (modeCombo && editor) {
+            const QString sourceBeforeModes = editor->toPlainText();
             modeCombo->setCurrentIndex(0);
             check(editor->isVisible(), "editor-only mode keeps source");
             modeCombo->setCurrentIndex(2);
             check(!editor->isVisible(), "preview-only mode hides source");
             modeCombo->setCurrentIndex(1);
+            check(editor->toPlainText() == sourceBeforeModes,
+                  "mode switches preserve Markdown source");
         }
         if (editor) {
+            const QString beforeReopen = editor->toPlainText();
+            noteDialog->openExistingNote(linkedId);
+            check(editor->toPlainText() == beforeReopen,
+                  "same note reopen keeps unsaved body");
             QImage image(40, 24, QImage::Format_ARGB32_Premultiplied);
             image.fill(QColor(QStringLiteral("#66cc99")));
             auto *mime = new QMimeData;
@@ -246,6 +508,12 @@ int main(int argc, char **argv)
                        .entryList({QStringLiteral("image-*.png")}, QDir::Files)
                        .isEmpty(),
                   "clipboard image saved to book assets");
+            bool regenerate = false;
+            for (QPushButton *button : noteDialog->findChildren<QPushButton *>()) {
+                if (button->text().contains(QStringLiteral("重新生成正文")))
+                    regenerate = true;
+            }
+            check(!regenerate, "regenerate-body action removed");
         }
         noteDialog->reject();
     }
@@ -279,6 +547,7 @@ int main(int argc, char **argv)
         check(single.open(QIODevice::ReadOnly), "single note export file");
         const QString singleText = QString::fromUtf8(single.readAll());
         check(singleText.contains(QStringLiteral("关联笔记")), "single note export title");
+        check(singleText.contains(QStringLiteral("$E=mc^2$")), "single note export keeps TeX");
         check(exportError.isEmpty(), "single note export no error");
 
         const QString treeDir = QDir(exportRoot).filePath(QStringLiteral("tree"));

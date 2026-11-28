@@ -1,0 +1,10 @@
+local project_src = path.join(os.projectdir(), "src")
+
+target("pano-reader-view")
+    add_rules("qt.static")
+    add_files(path.join(project_src, "reader/*.cpp"))
+    add_files(path.join(project_src, "reader/*.h"))
+    add_frameworks("QtCore", "QtGui", "QtWidgets", "QtPdf")
+    add_deps("pano-common", "pano-pdf", "pano-annotation")
+    add_includedirs(project_src)
+    set_encodings("utf-8")

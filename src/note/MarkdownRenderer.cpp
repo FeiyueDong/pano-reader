@@ -1,6 +1,7 @@
 #include "note/MarkdownRenderer.h"
 
 #include <QDir>
+#include <QFileInfo>
 #include <QImageReader>
 #include <QPainter>
 #include <QRegularExpression>
@@ -23,6 +24,50 @@ void appendHtml(const MD_CHAR *text, MD_SIZE size, void *data)
     target->append(text, static_cast<int>(size));
 }
 
+
+bool resolveBookImage(const QString &baseDirectory, const QString &source,
+                      QString *absolutePath, QString *reason)
+{
+    if (!absolutePath || !reason)
+        return false;
+    const QString base = QFileInfo(baseDirectory).canonicalFilePath();
+    if (base.isEmpty()) {
+        *reason = QStringLiteral("书籍目录不存在");
+        return false;
+    }
+    QString decoded = QUrl::fromPercentEncoding(source.toUtf8());
+    decoded.replace(QLatin1Char('\\'), QLatin1Char('/'));
+    if (decoded.isEmpty() || decoded.startsWith(QLatin1Char('/'))
+        || QRegularExpression(QStringLiteral("^[A-Za-z]:")).match(decoded).hasMatch()) {
+        *reason = QStringLiteral("不允许绝对路径");
+        return false;
+    }
+    const QString relative = QDir::cleanPath(decoded);
+    if (relative == QStringLiteral("..") || relative.startsWith(QStringLiteral("../"))
+        || QDir::isAbsolutePath(relative)) {
+        *reason = QStringLiteral("路径越出书籍目录");
+        return false;
+    }
+    const QString candidate = QDir(base).absoluteFilePath(relative);
+    const QFileInfo info(candidate);
+    const QString canonical = info.canonicalFilePath();
+    const QString prefix = base.endsWith(QLatin1Char('/')) ? base : base + QLatin1Char('/');
+    if (canonical.isEmpty() || !canonical.startsWith(prefix)) {
+        *reason = info.exists() ? QStringLiteral("符号链接越出书籍目录")
+                                : QStringLiteral("图片缺失");
+        return false;
+    }
+    if (!info.isFile()) {
+        *reason = QStringLiteral("不是普通文件");
+        return false;
+    }
+    if (info.size() > 32 * 1024 * 1024) {
+        *reason = QStringLiteral("文件超过 32 MiB");
+        return false;
+    }
+    *absolutePath = canonical;
+    return true;
+}
 QString decodeHtmlEntities(const QString &value)
 {
     QString out;
@@ -238,27 +283,36 @@ MarkdownRenderResult MarkdownRenderer::render(const QString &markdown,
                 replaced += QStringLiteral("<span class=\"asset-missing\">[图片已阻止：%1]</span>")
                                 .arg(src.toHtmlEscaped());
             } else {
-                const QString path = QDir(baseDirectory).absoluteFilePath(src);
-                QImageReader reader(path);
-                reader.setAutoTransform(true);
-                const QImage image = reader.read();
-                if (image.isNull()) {
+                QString path;
+                QString reason;
+                if (!resolveBookImage(baseDirectory, src, &path, &reason)) {
                     ++result.missingImages;
-                    result.warnings.append(QStringLiteral("图片缺失：%1").arg(path));
-                    replaced += QStringLiteral("<span class=\"asset-missing\">[图片缺失：%1]</span>")
+                    result.warnings.append(QStringLiteral("图片不可用：%1（%2）").arg(src, reason));
+                    replaced += QStringLiteral("<span class=\"asset-missing\">[图片不可用：%1]</span>")
                                     .arg(src.toHtmlEscaped());
                 } else {
-                    const QUrl url(QStringLiteral("pano-image:///") + QString::number(imageIndex++));
-                    result.resources.insert(url, image);
-                    QString tag = match.captured(0);
-                    tag.replace(QStringLiteral("src=\"%1\"").arg(src),
-                                QStringLiteral("src=\"%1\"").arg(url.toString()));
-                    if (image.width() > 720) {
-                        tag.insert(tag.size() - 1,
-                                   QStringLiteral(" width=\"720\" height=\"%1\"")
-                                       .arg(image.height() * 720 / image.width()));
+                    QImageReader reader(path);
+                    reader.setAutoTransform(true);
+                    const QImage image = reader.read();
+                    if (image.isNull() || image.width() > 8000 || image.height() > 8000
+                        || qint64(image.width()) * image.height() > 40000000) {
+                        ++result.missingImages;
+                        result.warnings.append(QStringLiteral("图片无法解码或尺寸过大：%1").arg(src));
+                        replaced += QStringLiteral("<span class=\"asset-missing\">[图片无法解码：%1]</span>")
+                                        .arg(src.toHtmlEscaped());
+                    } else {
+                        const QUrl url(QStringLiteral("pano-image:///") + QString::number(imageIndex++));
+                        result.resources.insert(url, image);
+                        QString tag = match.captured(0);
+                        tag.replace(QStringLiteral("src=\"%1\"").arg(src),
+                                    QStringLiteral("src=\"%1\"").arg(url.toString()));
+                        if (image.width() > 720) {
+                            tag.insert(tag.size() - 1,
+                                       QStringLiteral(" width=\"720\" height=\"%1\"")
+                                           .arg(image.height() * 720 / image.width()));
+                        }
+                        replaced += tag;
                     }
-                    replaced += tag;
                 }
             }
             last = match.capturedEnd();

@@ -173,6 +173,7 @@ signals:
     void textSelectionChanged();
     void regionSelectionChanged();
     void noteRequested(const QString &annotationId);
+    void notePointRequested(int pageIndex, const QPointF &pagePoint, const AnnotationStyle &style);
     void noteDeleteRequested(const QString &annotationId);
     void openFileRequested(const QString &filePath);
     void statusMessage(const QString &message);

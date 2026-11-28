@@ -130,6 +130,11 @@ bool NoteTree::addGroup(const QString &parentId, const QString &title, QString *
             *error = QStringLiteral("目标父节点不是分组。");
         return false;
     }
+    if (parentId.isEmpty() ? 1 > kMaxDepth : depthOf(parentId) + 1 > kMaxDepth) {
+        if (error)
+            *error = QStringLiteral("笔记树层级过深。");
+        return false;
+    }
     if (m_nodes.size() >= kMaxNodes) {
         if (error)
             *error = QStringLiteral("笔记树节点数量超过限制。");
@@ -279,13 +284,23 @@ bool NoteTree::moveNode(const QString &id, const QString &newParentId, QString *
         normalizeChildren(newParentId);
         return true;
     }
-    node->parentId = newParentId;
-    node->order = nextOrder(newParentId);
-    if (depthOf(id) > kMaxDepth) {
+    if (newParentId == id)
+        return true;
+    int subtreeDepth = 0;
+    for (const NoteTreeNode &candidate : m_nodes) {
+        if (candidate.id == id || isDescendant(candidate.id, id))
+            subtreeDepth = qMax(subtreeDepth, depthOf(candidate.id) - depthOf(id));
+    }
+    const int parentDepth = newParentId.isEmpty() ? 0 : depthOf(newParentId);
+    if (parentDepth + 1 + subtreeDepth > kMaxDepth) {
         if (error)
             *error = QStringLiteral("笔记树层级过深。");
         return false;
     }
+    const QString oldParentId = node->parentId;
+    node->parentId = newParentId;
+    node->order = nextOrder(newParentId);
+    normalizeChildren(oldParentId);
     normalizeChildren(newParentId);
     return true;
 }

@@ -46,13 +46,13 @@ public:
     bool moveUp(const QString &id, QString *error);
     bool moveDown(const QString &id, QString *error);
 
+    bool isDescendant(const QString &candidate, const QString &ancestor) const;
     bool validate(const QSet<QString> &noteIds, QString *error) const;
     QJsonArray toJson() const;
     static bool fromJson(const QJsonArray &array, NoteTree *out, QString *error);
 
 private:
     void normalizeChildren(const QString &parentId);
-    bool isDescendant(const QString &candidate, const QString &ancestor) const;
     int nextOrder(const QString &parentId) const;
 
     QVector<NoteTreeNode> m_nodes;

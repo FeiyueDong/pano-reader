@@ -1,0 +1,12 @@
+local project_src = path.join(os.projectdir(), "src")
+
+target("pano-library")
+    add_rules("qt.static")
+    add_files(path.join(project_src, "library/*.cpp"))
+    add_files(path.join(project_src, "library/*.h"))
+    add_files(path.join(project_src, "storage/*.cpp"))
+    add_files(path.join(project_src, "storage/*.h"))
+    add_frameworks("QtCore", "QtGui", "QtPdf")
+    add_deps("pano-common", "pano-pdf")
+    add_includedirs(project_src)
+    set_encodings("utf-8")

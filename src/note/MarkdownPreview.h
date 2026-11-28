@@ -2,6 +2,8 @@
 
 #include <QTextBrowser>
 
+#include "note/MarkdownRenderer.h"
+
 namespace pano {
 
 // Read-only rich-text preview of a Markdown note. Math is rendered locally and
@@ -15,6 +17,8 @@ public:
     explicit MarkdownPreview(QWidget *parent = nullptr);
 
     void setNoteMarkdown(const QString &markdown, const QString &baseDirectory);
+    void setRenderedMarkdown(const MarkdownRenderResult &rendered, const QString &markdown,
+                             const QString &baseDirectory);
     void setSearchQuery(const QString &query);
     QString searchQuery() const { return m_searchQuery; }
     QString baseDirectory() const { return m_baseDirectory; }

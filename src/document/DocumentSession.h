@@ -5,6 +5,7 @@
 #include <QObject>
 #include <QPointF>
 #include <QString>
+#include <QStringList>
 
 #include "annotation/Annotation.h"
 #include "common/LibraryTypes.h"
@@ -21,6 +22,23 @@ class PdfView;
 class SettingsManager;
 class ToolPresets;
 class ReaderWorkspace;
+
+// A note editor draft. It is deliberately separate from the formal NoteModel:
+// nothing here is published until the whole reading-data file has been written
+// successfully.
+struct NoteDraft
+{
+    QString noteId;
+    QString title;
+    QString markdown;
+    QString annotationId;
+    QString parentGroupId;
+    bool isNew = false;
+    bool createNotePoint = false;
+    int pageIndex = -1;
+    QPointF pagePoint;
+    AnnotationStyle notePointStyle;
+};
 
 // One open book: owns the reader widget, the annotation document and the
 // debounced persistence policy. A session exists once per book and is flushed
@@ -59,6 +77,8 @@ public:
     bool hasLinkedNote(const QString &annotationId) const;
     const Note *note(const QString &noteId) const;
 
+    bool commitNoteDraft(const NoteDraft &draft, QString *noteId, QString *errorMessage);
+    bool deleteAnnotationAndNote(const QString &annotationId, QString *errorMessage);
     bool createNote(Note note, const QString &parentGroupId, QString *noteId,
                     QString *errorMessage);
     bool updateNote(const Note &note, QString *errorMessage);
@@ -82,6 +102,7 @@ public:
 
     bool writeAsset(const QString &prefix, const QString &extension, const QByteArray &bytes,
                     QString *relativePath, QString *errorMessage);
+    void discardDraftAssets(const QStringList &relativePaths);
 
     ReadingState readingState() const;
     void setZoomMode(ZoomMode mode);
@@ -107,6 +128,10 @@ private slots:
 
 private:
     bool commitReadingEdit(const QString &undoText, const std::function<bool(QString *)> &mutation, QString *errorMessage);
+    bool validateReadingModels(const QVector<Annotation> &annotations, const NoteModel &notes,
+                               const NoteTree &tree, QString *errorMessage) const;
+    void restoreReadingModels(const QVector<Annotation> &annotations, const QVector<Note> &notes,
+                              const NoteTree &tree);
     void captureReadingState();
     void saveReadingState();
     QByteArray annotationsFingerprint() const;

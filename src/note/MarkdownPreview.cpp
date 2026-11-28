@@ -75,12 +75,17 @@ void MarkdownPreview::changeEvent(QEvent *event)
 
 void MarkdownPreview::setNoteMarkdown(const QString &markdown, const QString &baseDirectory)
 {
+    const qreal base = font().pointSizeF() > 0.0 ? font().pointSizeF() : 11.0;
+    setRenderedMarkdown(MarkdownRenderer::render(markdown, baseDirectory, base,
+                                                  palette().color(QPalette::Text)),
+                        markdown, baseDirectory);
+}
+
+void MarkdownPreview::setRenderedMarkdown(const MarkdownRenderResult &rendered,
+                                          const QString &markdown, const QString &baseDirectory)
+{
     m_baseDirectory = baseDirectory;
     m_lastMarkdown = markdown;
-    const qreal base = font().pointSizeF() > 0.0 ? font().pointSizeF() : 11.0;
-    const MarkdownRenderResult rendered =
-        MarkdownRenderer::render(markdown, baseDirectory, base, palette().color(QPalette::Text));
-
     document()->clear();
     for (auto it = rendered.resources.cbegin(); it != rendered.resources.cend(); ++it)
         document()->addResource(QTextDocument::ImageResource, it.key(), it.value());

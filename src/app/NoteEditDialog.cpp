@@ -9,6 +9,7 @@
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QImage>
+#include <QKeyEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -30,6 +31,9 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <functional>
+
+#include <QFile>
+#include <QFileInfo>
 
 #include "annotation/Annotation.h"
 #include "document/DocumentSession.h"
@@ -223,13 +227,11 @@ NoteEditDialog::NoteEditDialog(DocumentSession *session, QWidget *parent)
     auto *toolRow = new QHBoxLayout;
     auto *imageButton = new QPushButton(tr("插入图片"), this);
     auto *captureButton = new QPushButton(tr("区域截图"), this);
-    auto *regenerateButton = new QPushButton(tr("重新生成正文"), this);
     m_searchEdit = new QLineEdit(this);
     m_searchEdit->setPlaceholderText(tr("在预览中查找"));
     m_searchEdit->setClearButtonEnabled(true);
     toolRow->addWidget(imageButton);
     toolRow->addWidget(captureButton);
-    toolRow->addWidget(regenerateButton);
     toolRow->addWidget(m_searchEdit, 1);
     m_modeCombo = new QComboBox(this);
     m_modeCombo->addItems({tr("仅编辑"), tr("分栏"), tr("仅预览")});
@@ -286,7 +288,6 @@ NoteEditDialog::NoteEditDialog(DocumentSession *session, QWidget *parent)
     connect(largerButton, &QPushButton::clicked, this, [adjustFont] { adjustFont(1); });
     connect(imageButton, &QPushButton::clicked, this, &NoteEditDialog::imageRequested);
     connect(captureButton, &QPushButton::clicked, this, &NoteEditDialog::captureRequested);
-    connect(regenerateButton, &QPushButton::clicked, this, &NoteEditDialog::regenerateMarkdown);
     connect(m_searchEdit, &QLineEdit::textChanged, this, [this](const QString &text) {
         if (m_preview)
             m_preview->setSearchQuery(text);
@@ -338,8 +339,35 @@ NoteEditDialog::NoteEditDialog(DocumentSession *session, QWidget *parent)
     });
 }
 
+bool NoteEditDialog::confirmSwitchTarget(const QString &targetNoteId)
+{
+    if (!isVisible() || !m_dirty || m_note.id.isEmpty() || m_note.id == targetNoteId)
+        return true;
+    const QMessageBox::StandardButton result = QMessageBox::question(
+        this, tr("切换编辑目标"), tr("当前笔记有未保存的修改。保存后再切换吗？"),
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    if (result == QMessageBox::Cancel)
+        return false;
+    if (result == QMessageBox::Save) {
+        QString error;
+        if (!saveInternal(false, &error)) {
+            if (!error.isEmpty())
+                QMessageBox::warning(this, tr("保存失败"), error);
+            return false;
+        }
+        return true;
+    }
+    m_dirty = false;
+    m_createNotePoint = false;
+    cleanupDraftAssets();
+    return true;
+}
+
 void NoteEditDialog::openNewNote(const QString &parentGroupId, const QString &annotationId)
 {
+    if (!confirmSwitchTarget(QString()))
+        return;
+    m_closedEmitted = false;
     m_note = Note();
     m_note.id = newNoteId();
     m_note.title = QStringLiteral("未命名笔记");
@@ -347,27 +375,48 @@ void NoteEditDialog::openNewNote(const QString &parentGroupId, const QString &an
     m_note.createdAt = nowIsoUtc();
     m_note.modifiedAt = m_note.createdAt;
     m_parentGroupId = parentGroupId;
+    m_pendingPageIndex = -1;
+    m_createNotePoint = false;
     m_isNew = true;
     m_dirty = true;
-    m_editor->clear();
     if (m_session && !annotationId.isEmpty()) {
         if (const Annotation *annotation = m_session->view()->annotations()->find(annotationId)) {
             const QString excerpt = annotation->text.trimmed();
             if (!excerpt.isEmpty()) {
                 QString quoted;
                 const QStringList lines = excerpt.split(QLatin1Char('\n'));
-                for (const QString &line : lines)
-                    quoted += QStringLiteral("> ") + line + QLatin1Char('\n');
-                m_editor->setPlainText(quoted + QLatin1Char('\n'));
+                for (const QString &line : lines) {
+                    QString escaped;
+                    for (const QChar ch : line) {
+                        if (QStringLiteral("\\`*_{}[]()#+-.!>|$").contains(ch))
+                            escaped += QLatin1Char('\\');
+                        escaped += ch;
+                    }
+                    quoted += QStringLiteral("> ") + escaped + QLatin1Char('\n');
+                }
+                m_note.markdown = quoted + QLatin1Char('\n');
             }
         }
     }
+    loadEditorContent();
     updateHeader();
+    refreshPreview();
     show();
     raise();
     activateWindow();
     m_titleEdit->selectAll();
     m_titleEdit->setFocus();
+}
+
+void NoteEditDialog::openNewNoteAtPoint(const QString &parentGroupId, int pageIndex,
+                                        const QPointF &pagePoint, const AnnotationStyle &style)
+{
+    openNewNote(parentGroupId);
+    m_createNotePoint = true;
+    m_pendingPageIndex = pageIndex;
+    m_pendingPagePoint = pagePoint;
+    m_pendingPointStyle = style;
+    updateHeader();
 }
 
 void NoteEditDialog::openExistingNote(const QString &noteId)
@@ -377,11 +426,24 @@ void NoteEditDialog::openExistingNote(const QString &noteId)
         QMessageBox::warning(this, tr("编辑笔记"), tr("笔记已不存在。"));
         return;
     }
+    if (isVisible() && m_note.id == noteId) {
+        show();
+        raise();
+        activateWindow();
+        return;
+    }
+    if (!confirmSwitchTarget(noteId))
+        return;
+    m_closedEmitted = false;
     m_note = *value;
     m_parentGroupId.clear();
+    m_pendingPageIndex = -1;
+    m_createNotePoint = false;
     m_isNew = false;
     m_dirty = false;
+    loadEditorContent();
     updateHeader();
+    refreshPreview();
     show();
     raise();
     activateWindow();
@@ -394,9 +456,6 @@ void NoteEditDialog::updateHeader()
     m_titleEdit->blockSignals(true);
     m_titleEdit->setText(m_note.title);
     m_titleEdit->blockSignals(false);
-    m_editor->blockSignals(true);
-    m_editor->setPlainText(m_note.markdown);
-    m_editor->blockSignals(false);
     const Annotation *annotation = m_session && !m_note.annotationId.isEmpty()
                                        ? m_session->view()->annotations()->find(m_note.annotationId)
                                        : nullptr;
@@ -413,7 +472,13 @@ void NoteEditDialog::updateHeader()
         m_locateButton->setEnabled(false);
     }
     setWindowModified(m_dirty);
-    refreshPreview();
+}
+
+void NoteEditDialog::loadEditorContent()
+{
+    m_editor->blockSignals(true);
+    m_editor->setPlainText(m_note.markdown);
+    m_editor->blockSignals(false);
 }
 
 void NoteEditDialog::schedulePreview()
@@ -435,7 +500,7 @@ void NoteEditDialog::refreshPreview()
     const int oldValue = scroll->value();
     const int oldMaximum = scroll->maximum();
     const qreal ratio = oldMaximum > 0 ? qreal(oldValue) / qreal(oldMaximum) : 0.0;
-    m_preview->setNoteMarkdown(markdown, m_session->bookDirectory());
+    m_preview->setRenderedMarkdown(result, markdown, m_session->bookDirectory());
     QTimer::singleShot(0, m_preview, [scroll, ratio] {
         scroll->setValue(qRound(ratio * scroll->maximum()));
     });
@@ -450,26 +515,6 @@ void NoteEditDialog::refreshPreview()
     m_renderStatus->setToolTip(result.warnings.join(QLatin1Char('\n')));
 }
 
-void NoteEditDialog::regenerateMarkdown()
-{
-    if (!m_preview)
-        return;
-    const QString markdown = m_preview->document()->toMarkdown(QTextDocument::MarkdownDialectGitHub).trimmed();
-    if (markdown.isEmpty()) {
-        QMessageBox::information(this, tr("重新生成正文"), tr("预览中没有可转换为 Markdown 的内容。"));
-        return;
-    }
-    if (QMessageBox::question(this, tr("重新生成正文"),
-                              tr("将用当前预览内容替换 Markdown 正文，未保存的正文修改会丢失。是否继续？"),
-                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
-        != QMessageBox::Yes) {
-        return;
-    }
-    m_editor->setPlainText(markdown);
-    m_dirty = true;
-    schedulePreview();
-}
-
 bool NoteEditDialog::saveInternal(bool closeAfter, QString *errorMessage)
 {
     if (!m_session) {
@@ -477,37 +522,52 @@ bool NoteEditDialog::saveInternal(bool closeAfter, QString *errorMessage)
             *errorMessage = QStringLiteral("会话不可用。");
         return false;
     }
-    m_note.title = m_titleEdit->text().trimmed();
-    if (m_note.title.isEmpty())
-        m_note.title = QStringLiteral("未命名笔记");
-    m_note.markdown = m_editor->toPlainText();
-    if (!m_note.annotationId.isEmpty() && !m_session->view()->annotations()->find(m_note.annotationId)) {
-        m_note.annotationId.clear();
+    if (!m_dirty && !m_createNotePoint) {
+        if (closeAfter)
+            accept();
+        return true;
     }
+    NoteDraft draft;
+    draft.noteId = m_note.id;
+    draft.title = m_titleEdit->text().trimmed();
+    if (draft.title.isEmpty())
+        draft.title = QStringLiteral("未命名笔记");
+    draft.markdown = m_editor->toPlainText();
+    draft.parentGroupId = m_parentGroupId;
+    draft.isNew = m_isNew;
+    draft.createNotePoint = m_createNotePoint;
+    draft.pageIndex = m_pendingPageIndex;
+    draft.pagePoint = m_pendingPagePoint;
+    draft.notePointStyle = m_pendingPointStyle;
+    // New notes carry the requested relation. Existing notes submit only the
+    // edited title/body; DocumentSession reads the current formal link.
+    if (m_isNew)
+        draft.annotationId = m_note.annotationId;
+
     QString localError;
-    bool ok = false;
-    if (m_isNew) {
-        QString id;
-        ok = m_session->createNote(m_note, m_parentGroupId, &id, &localError);
-        if (ok) {
-            m_note.id = id;
-            m_isNew = false;
-        }
-    } else {
-        ok = m_session->updateNote(m_note, &localError);
-    }
-    if (!ok) {
+    QString committedId;
+    if (!m_session->commitNoteDraft(draft, &committedId, &localError)) {
         if (errorMessage)
             *errorMessage = localError.isEmpty() ? QStringLiteral("保存笔记失败。") : localError;
         return false;
     }
+    m_note.id = committedId;
+    m_note.title = draft.title;
+    m_note.markdown = draft.markdown;
+    m_note.annotationId = m_session->note(committedId)->annotationId;
+    m_note.modifiedAt = nowIsoUtc();
+    m_isNew = false;
+    m_createNotePoint = false;
+    m_pendingPageIndex = -1;
     m_dirty = false;
+    m_committedAssets.unite(m_draftAssets);
+    m_draftAssets.clear();
     setWindowModified(false);
     updateHeader();
     emit saved(m_note.id);
     if (closeAfter) {
         m_closing = true;
-        QDialog::accept();
+        accept();
         m_closing = false;
     }
     return true;
@@ -532,14 +592,44 @@ void NoteEditDialog::insertMarkdown(const QString &text)
 
 bool NoteEditDialog::commitIfDirty(QString *errorMessage)
 {
-    if (!m_dirty)
+    if (!m_dirty && !m_createNotePoint)
         return true;
     return saveInternal(false, errorMessage);
 }
 
+bool NoteEditDialog::prepareToClose(QString *errorMessage)
+{
+    if (!m_dirty && !m_createNotePoint)
+        return true;
+    const QMessageBox::StandardButton result = QMessageBox::question(
+        this, tr("未保存的笔记"), tr("关闭前如何处理未保存的笔记修改？"),
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    if (result == QMessageBox::Cancel)
+        return false;
+    if (result == QMessageBox::Discard) {
+        m_dirty = false;
+        m_createNotePoint = false;
+        cleanupDraftAssets();
+        reject();
+        return true;
+    }
+    if (!saveInternal(false, errorMessage))
+        return false;
+    accept();
+    return true;
+}
+
+void NoteEditDialog::cleanupDraftAssets()
+{
+    if (!m_session || m_draftAssets.isEmpty())
+        return;
+    m_session->discardDraftAssets(QStringList(m_draftAssets.begin(), m_draftAssets.end()));
+    m_draftAssets.clear();
+}
+
 void NoteEditDialog::requestClose()
 {
-    if (!m_dirty) {
+    if (!m_dirty && !m_createNotePoint) {
         reject();
         return;
     }
@@ -557,17 +647,27 @@ void NoteEditDialog::requestClose()
         }
     } else {
         m_dirty = false;
+        m_createNotePoint = false;
+        cleanupDraftAssets();
     }
     reject();
+}
+
+void NoteEditDialog::keyPressEvent(QKeyEvent *event)
+{
+    if (event && event->key() == Qt::Key_Escape) {
+        requestClose();
+        return;
+    }
+    QDialog::keyPressEvent(event);
 }
 
 void NoteEditDialog::closeEvent(QCloseEvent *event)
 {
     QSettings settings;
     settings.setValue(QStringLiteral("noteEditor/geometry"), saveGeometry());
-    if (m_closing || !m_dirty) {
+    if (m_closing || (!m_dirty && !m_createNotePoint)) {
         QDialog::closeEvent(event);
-        emit closed();
         return;
     }
     event->ignore();
@@ -592,6 +692,34 @@ void NoteEditDialog::applyMode(int mode)
         m_editor->setFocus();
 }
 
+void NoteEditDialog::done(int result)
+{
+    QSettings settings;
+    settings.setValue(QStringLiteral("noteEditor/geometry"), saveGeometry());
+    if (!m_closedEmitted) {
+        m_closedEmitted = true;
+        if (result != QDialog::Accepted)
+            cleanupDraftAssets();
+        QDialog::done(result);
+        emit closed();
+        return;
+    }
+    QDialog::done(result);
+}
+
+NoteEditDialog::~NoteEditDialog()
+{
+    cleanupDraftAssets();
+}
+
+void NoteEditDialog::insertAssetMarkdown(const QString &relativePath, const QString &altText)
+{
+    if (relativePath.isEmpty())
+        return;
+    m_draftAssets.insert(relativePath);
+    insertMarkdown(QStringLiteral("![%1](%2)\n").arg(altText, relativePath));
+}
+
 void NoteEditDialog::insertImageData(const QImage &image)
 {
     if (image.isNull() || !m_session)
@@ -608,7 +736,7 @@ void NoteEditDialog::insertImageData(const QImage &image)
         QMessageBox::warning(this, tr("插入图片失败"), error);
         return;
     }
-    insertMarkdown(QStringLiteral("![剪贴板图片](%1)\n").arg(relative));
+    insertAssetMarkdown(relative, tr("剪贴板图片"));
 }
 
 } // namespace pano

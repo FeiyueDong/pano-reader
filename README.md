@@ -3,10 +3,15 @@
 PANO 是一款本地优先的 PDF 阅读与标注工作区。它把 PDF 视为只读源文件，在独立的书库
 目录中保存标注、阅读状态和 Markdown 笔记；不依赖账号、云端或网络。
 
-当前版本是 Phase 3.2 专业笔记编辑器与工程组织版本。正式程序采用模块化静态库构建；
+当前版本是 Phase 3.2.1 笔记数据安全与稳定化版本。正式程序采用模块化静态库构建；
 笔记编辑器使用 MD4C + JKQTMathText 渲染 Markdown/公式，提供两栏预览、格式工具栏、
 查找、字号持久化和笔记/树导出；阅读器继续使用独立 `Note` 模型、`NoteTree` 和
-`annotations.json` schema 2。旧的 schema 1 数据会被明确拒绝，不做自动迁移。
+`annotations.json` schema 2。旧 schema 1 数据会被明确拒绝，不做自动迁移。
+
+本阶段重点修复草稿生命周期与数据安全：编辑器草稿不再被自动保存、切换标签或主窗口
+保存隐式提交；只有显式保存或关闭时选择的“保存”才以一次原子写入发布 Note、关联、
+笔记树和必要标注。取消定位笔记不会留下 NotePoint、树节点或撤销项；未提交图片按草稿
+归属清理。资源路径、导出目标、同名分组、虚拟根节点和双向关联也已收紧。
 Phase 0 的 PDF Demo 和 Phase 3.0 Markdown Demo 归档在 [`demo/`](demo/)，由根工程
 选项按需构建，默认不参与正式构建。
 
@@ -42,6 +47,9 @@ Phase 0 的 PDF Demo 和 Phase 3.0 Markdown Demo 归档在 [`demo/`](demo/)，�
   或多级笔记树中，也可与一个标注建立可选的一对一关联。右侧笔记页提供新建笔记/分组、
   重命名、移动、排序、删除、关联/解除关联和精确定位；独立非模态编辑器绑定
   `book_id + note_id`，支持保存继续、确定关闭、取消和关闭前保存提示。
+- 数据安全：笔记草稿在保存成功前不写入正式文件，取消或丢弃不会留下半成品对象；
+  外部修改 `annotations.json` 时拒绝覆盖并保留草稿；导出拒绝覆盖、符号链接和书库内部
+  目标；Markdown 图片仅允许书库内普通文件并限制大小。
 - 笔记内容：使用 MD4C（CommonMark/GFM）和 JKQTMathText 离线渲染 Markdown、表格、
   删除线、行内/显示公式、矩阵与分段函数；图片和区域截图保存在书库 `assets/`。编辑器
   支持格式工具栏、预览查找、字号持久化、保存继续/确定/取消，草稿在保存成功前不写入
@@ -197,7 +205,8 @@ PANO_CONFIG_DIR=/tmp/pano-config QT_QPA_PLATFORM=offscreen \
 探针覆盖数据安全、导入与哈希、书架不变量、标注/笔记持久化、外部修改保护、阅读状态、
 四种旋转与滚动坐标变换、文字选区合并、智能选择与浮动操作、主题与设置取消、四种页面
 布局、缩放模式、搜索/书签/导航、复制粘贴、橡皮连续擦除、滚轮翻页冷却、Shift 两点路径、
-属性栏高度、缩略图缓存与全屏退出；不替代人工 GUI 验收。Phase 3.2 见
+属性栏高度、缩略图缓存与全屏退出；不替代人工 GUI 验收。Phase 3.2.1 见
+[`phase3.2.1-results.md`](docs/development/log/phase3.2.1-results.md)，Phase 3.2 见
 [`phase3.2-results.md`](docs/development/log/phase3.2-results.md)，Phase 3.1 见
 [`phase3.1-results.md`](docs/development/log/phase3.1-results.md)，Phase 2.2 见
 [`phase2.2-results.md`](docs/development/log/phase2.2-results.md)，Phase 2.1 见
@@ -221,7 +230,9 @@ PANO_CONFIG_DIR=/tmp/pano-config QT_QPA_PLATFORM=offscreen \
 | `docs/specification/` | 数据格式规范 |
 | `docs/development/` | 阶段需求、结果记录、截图 |
 | `demo/` | Phase 0 归档工程，独立构建 |
-| `tools/` | 数据/坐标/主题/UI 探针与示例 PDF 构建脚本 |
+| `tests/` | 八项确定性功能探针（`--build_tests=y`） |
+| `tools/` | 打开/渲染性能诊断（`--build_tools=y`）与示例 PDF 构建脚本 |
+| `src/buildcfg/` | 按模块拆分的 xmake 目标定义 |
 
 ## 已知限制
 

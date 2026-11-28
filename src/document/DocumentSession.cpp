@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QSet>
 #include <algorithm>
+#include <cmath>
 #include <QtGlobal>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -351,16 +352,10 @@ bool DocumentSession::saveNow(QString *errorMessage)
 {
     if (!m_loaded || !m_manager || !m_manager->isOpen())
         return true;
-    if (m_workspace) {
+    // R01: saving formal reading data must never submit, close or reload a note
+    // editor draft. The editor owns that lifecycle (NoteEditDialog Ctrl+S).
+    if (m_workspace)
         m_workspace->flushPendingStyle();
-        QString noteError;
-        if (!m_workspace->commitPendingNote(&noteError)) {
-            if (errorMessage)
-                *errorMessage = noteError;
-            emit saveFailed(noteError);
-            return false;
-        }
-    }
     if (!m_dirty) {
         saveReadingState();
         if (m_bookmarkStore.isDirty()) {
@@ -431,8 +426,11 @@ void DocumentSession::flush()
         saveReadingState();
     if (m_bookmarkStore.isDirty()) {
         QString bookmarkError;
-        if (!m_bookmarkStore.save(&bookmarkError))
+        if (!m_bookmarkStore.save(&bookmarkError)) {
+            m_dirty = true;
+            emit dirtyChanged(true);
             emit saveFailed(bookmarkError);
+        }
     }
     m_autosaveTimer->stop();
     m_maxTimer->stop();
@@ -591,6 +589,7 @@ bool DocumentSession::commitReadingEdit(const QString &undoText,
 
     QString localError;
     if (!mutation(&localError)) {
+        restoreReadingModels(beforeAnnotations, beforeNotes, beforeTree);
         if (errorMessage)
             *errorMessage = localError;
         return false;
@@ -599,6 +598,12 @@ bool DocumentSession::commitReadingEdit(const QString &undoText,
     const QVector<Annotation> afterAnnotations = view()->annotations()->annotations();
     const QVector<Note> afterNotes = m_notes.notes();
     const NoteTree afterTree = m_noteTree;
+    if (!validateReadingModels(afterAnnotations, m_notes, afterTree, &localError)) {
+        restoreReadingModels(beforeAnnotations, beforeNotes, beforeTree);
+        if (errorMessage)
+            *errorMessage = localError;
+        return false;
+    }
     if (auto *stack = view()->undoStack()) {
         stack->push(new ReadingSnapshotCommand(this, undoText, beforeAnnotations, beforeNotes,
                                                beforeTree, afterAnnotations, afterNotes, afterTree));
@@ -625,6 +630,248 @@ void DocumentSession::notifyReadingDataChanged()
 {
     emit readingDataChanged();
     markDirty();
+}
+
+bool DocumentSession::validateReadingModels(const QVector<Annotation> &annotations,
+                                             const NoteModel &notes, const NoteTree &tree,
+                                             QString *errorMessage) const
+{
+    QSet<QString> annotationIds;
+    for (const Annotation &annotation : annotations) {
+        if (annotation.id.isEmpty() || annotationIds.contains(annotation.id)) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("标注数据包含重复或空 ID。");
+            return false;
+        }
+        annotationIds.insert(annotation.id);
+        if (annotation.pageIndex < 0 || annotation.pageIndex >= view()->pageCount()) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("标注页码超出当前文档范围。");
+            return false;
+        }
+    }
+    QSet<QString> noteIds;
+    for (const Note &note : notes.notes()) {
+        if (note.id.isEmpty() || noteIds.contains(note.id)) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("笔记数据包含重复或空 ID。");
+            return false;
+        }
+        noteIds.insert(note.id);
+        if (!note.annotationId.isEmpty() && !annotationIds.contains(note.annotationId)) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("笔记关联的标注不存在。");
+            return false;
+        }
+    }
+    QString treeError;
+    if (!tree.validate(noteIds, &treeError)) {
+        if (errorMessage)
+            *errorMessage = treeError.isEmpty() ? QStringLiteral("笔记树结构无效。") : treeError;
+        return false;
+    }
+    return true;
+}
+
+void DocumentSession::restoreReadingModels(const QVector<Annotation> &annotations,
+                                           const QVector<Note> &notes, const NoteTree &tree)
+{
+    if (!view())
+        return;
+    m_restoringReadingData = true;
+    view()->annotations()->setAnnotations(annotations);
+    m_notes.setNotes(notes);
+    m_noteTree = tree;
+    m_restoringReadingData = false;
+    emit readingDataChanged();
+}
+
+bool DocumentSession::commitNoteDraft(const NoteDraft &draft, QString *noteId,
+                                      QString *errorMessage)
+{
+    if (!m_loaded || !m_manager || !m_manager->isOpen() || !view() || !view()->hasDocument()) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("阅读会话未就绪。");
+        return false;
+    }
+    if (draft.noteId.isEmpty()) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("笔记草稿缺少稳定 ID。");
+        return false;
+    }
+    if (!draft.isNew && !m_notes.find(draft.noteId)) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("笔记已被删除或撤销，无法保存。");
+        return false;
+    }
+    if (draft.isNew && m_notes.find(draft.noteId)) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("笔记 ID 已被占用，请重新创建草稿。");
+        return false;
+    }
+
+    const QVector<Annotation> beforeAnnotations = view()->annotations()->annotations();
+    const QVector<Note> beforeNotes = m_notes.notes();
+    const NoteTree beforeTree = m_noteTree;
+
+    QVector<Annotation> candidateAnnotations = beforeAnnotations;
+    NoteModel candidateNotes = m_notes;
+    NoteTree candidateTree = m_noteTree;
+    Note candidate = draft.isNew ? Note() : *m_notes.find(draft.noteId);
+    candidate.id = draft.noteId;
+    candidate.title = draft.title.trimmed().isEmpty() ? QStringLiteral("未命名笔记")
+                                                       : draft.title.trimmed();
+    candidate.markdown = draft.markdown;
+    if (draft.isNew) {
+        candidate.createdAt = nowIsoUtc();
+        candidate.annotationId = draft.annotationId;
+    }
+    // Existing note: only the edited title/body are submitted. Read the current
+    // link, never revive an old annotation relation captured by the dialog.
+    candidate.modifiedAt = nowIsoUtc();
+
+    QString committedAnnotationId = candidate.annotationId;
+    if (draft.createNotePoint) {
+        if (draft.pageIndex < 0 || draft.pageIndex >= view()->pageCount()
+            || !std::isfinite(draft.pagePoint.x()) || !std::isfinite(draft.pagePoint.y())) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("定位笔记的页面或坐标无效。");
+            return false;
+        }
+        Annotation point;
+        point.id = newAnnotationId();
+        point.pageIndex = draft.pageIndex;
+        point.type = AnnotationType::NotePoint;
+        point.p1 = draft.pagePoint;
+        point.rect = QRectF(draft.pagePoint, QSizeF(0.0, 0.0));
+        point.style = draft.notePointStyle;
+        point.createdAt = nowIsoUtc();
+        point.modifiedAt = point.createdAt;
+        candidateAnnotations.append(point);
+        committedAnnotationId = point.id;
+    }
+    candidate.annotationId = committedAnnotationId;
+
+    if (!candidate.annotationId.isEmpty()) {
+        const auto found = std::find_if(candidateAnnotations.cbegin(), candidateAnnotations.cend(),
+            [&](const Annotation &annotation) { return annotation.id == candidate.annotationId; });
+        if (found == candidateAnnotations.cend()) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("关联的标注已不存在，请重新选择或转为独立笔记。");
+            return false;
+        }
+        const Note *other = candidateNotes.forAnnotation(candidate.annotationId);
+        if (other && other->id != candidate.id) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("该标注已经关联了其他笔记，不能隐式覆盖。");
+            return false;
+        }
+    }
+
+    QString mutationError;
+    if (draft.isNew) {
+        if (!candidateNotes.insert(candidate, &mutationError)
+            || !candidateTree.addNote(draft.parentGroupId, candidate.id, &mutationError)) {
+            if (errorMessage)
+                *errorMessage = mutationError;
+            return false;
+        }
+    } else {
+        const bool sameTitle = candidate.title == m_notes.find(candidate.id)->title;
+        const bool sameBody = candidate.markdown == m_notes.find(candidate.id)->markdown;
+        if (sameTitle && sameBody) {
+            if (noteId)
+                *noteId = candidate.id;
+            return true;
+        }
+        if (!candidateNotes.replace(candidate.id, candidate, &mutationError)) {
+            if (errorMessage)
+                *errorMessage = mutationError;
+            return false;
+        }
+    }
+
+    if (!validateReadingModels(candidateAnnotations, candidateNotes, candidateTree, errorMessage))
+        return false;
+
+    const QByteArray currentFingerprint = annotationsFingerprint();
+    if (currentFingerprint != m_annotationsFingerprint) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("标注文件已被外部修改，笔记未保存。请关闭并重新打开本书后重试。");
+        return false;
+    }
+
+    QJsonArray annotations;
+    for (int index = 0; index < candidateAnnotations.size(); ++index) {
+        QJsonObject object = candidateAnnotations.at(index).toJson();
+        object.insert(QStringLiteral("z_order"), index);
+        annotations.append(object);
+    }
+    QJsonArray notes;
+    for (const Note &value : candidateNotes.notes())
+        notes.append(value.toJson());
+    QString writeError;
+    if (!m_manager->store()->writeReadingData(m_book.directory, m_book.id, annotations, notes,
+                                               candidateTree.toJson(), &writeError)) {
+        if (errorMessage)
+            *errorMessage = writeError.isEmpty() ? QStringLiteral("无法写入笔记文件。") : writeError;
+        return false;
+    }
+
+    // The file is the commit point. Publish the candidate models only now.
+    m_restoringReadingData = true;
+    view()->annotations()->setAnnotations(candidateAnnotations);
+    m_notes.setNotes(candidateNotes.notes());
+    m_noteTree = candidateTree;
+    m_restoringReadingData = false;
+    m_annotationsFingerprint = annotationsFingerprint();
+    if (auto *stack = view()->undoStack()) {
+        stack->push(new ReadingSnapshotCommand(this, draft.isNew ? QStringLiteral("新建笔记")
+                                                                 : QStringLiteral("修改笔记"),
+                                               beforeAnnotations, beforeNotes, beforeTree,
+                                               candidateAnnotations, candidateNotes.notes(),
+                                               candidateTree));
+    }
+    m_dirty = false;
+    m_autosaveActive = false;
+    if (m_autosaveTimer)
+        m_autosaveTimer->stop();
+    if (m_maxTimer)
+        m_maxTimer->stop();
+    emit dirtyChanged(false);
+    emit readingDataChanged();
+    emit statusMessage(QStringLiteral("笔记已保存"));
+    // A bookmark failure is independent (R02 partial-failure rule): the note is
+    // already on disk and must not be recreated or rolled back.
+    if (m_bookmarkStore.isDirty()) {
+        QString bookmarkError;
+        if (!m_bookmarkStore.save(&bookmarkError)) {
+            m_dirty = true;
+            emit dirtyChanged(true);
+            emit saveFailed(bookmarkError);
+        }
+    }
+    if (noteId)
+        *noteId = candidate.id;
+    return true;
+}
+
+bool DocumentSession::deleteAnnotationAndNote(const QString &annotationId,
+                                              QString *errorMessage)
+{
+    const Note *linked = m_notes.forAnnotation(annotationId);
+    const QString noteId = linked ? linked->id : QString();
+    return commitReadingEdit(QStringLiteral("删除标注和笔记"), [&](QString *error) {
+        if (!noteId.isEmpty()) {
+            if (!m_notes.remove(noteId))
+                return false;
+            if (!m_noteTree.removeNode(noteId, false, error))
+                return false;
+        }
+        if (!view()->annotations()->removeById(annotationId))
+            return false;
+        return true;
+    }, errorMessage);
 }
 
 bool DocumentSession::createNote(Note noteValue, const QString &parentGroupId, QString *noteId,
@@ -716,12 +963,18 @@ bool DocumentSession::deleteNote(const QString &noteId, bool removeNotePoint, QS
     }
     const QString annotationId = existing->annotationId;
     return commitReadingEdit(QStringLiteral("删除笔记"), [&](QString *error) {
-        m_notes.remove(noteId);
-        m_noteTree.removeNode(noteId, false, error);
+        if (!m_notes.remove(noteId))
+            return false;
+        if (!m_noteTree.removeNode(noteId, false, error))
+            return false;
         if (removeNotePoint && !annotationId.isEmpty()) {
             const Annotation *annotation = view()->annotations()->find(annotationId);
-            if (annotation && annotation->type == AnnotationType::NotePoint)
-                view()->annotations()->removeById(annotationId);
+            if (annotation && annotation->type == AnnotationType::NotePoint
+                && !view()->annotations()->removeById(annotationId)) {
+                if (error)
+                    *error = QStringLiteral("无法删除定位点。");
+                return false;
+            }
         }
         return true;
     }, errorMessage);
@@ -895,6 +1148,37 @@ bool DocumentSession::writeAsset(const QString &prefix, const QString &extension
     if (relativePath)
         *relativePath = QStringLiteral("assets/%1").arg(fileName);
     return true;
+}
+
+void DocumentSession::discardDraftAssets(const QStringList &relativePaths)
+{
+    if (relativePaths.isEmpty() || !m_manager)
+        return;
+    // Only files created for an uncommitted draft are candidates. Before
+    // deleting, re-check the current formal notes so an asset already used by
+    // another note (or by an earlier successful save) is never removed.
+    const QString assetsRoot = QDir(assetsDirectory()).absolutePath();
+    for (const QString &relative : relativePaths) {
+        if (!relative.startsWith(QStringLiteral("assets/"))
+            || !isSafeLibraryRelativePath(relative))
+            continue;
+        bool referenced = false;
+        for (const Note &note : m_notes.notes()) {
+            if (note.markdown.contains(relative)) {
+                referenced = true;
+                break;
+            }
+        }
+        if (referenced)
+            continue;
+        const QString absolute = QDir(bookDirectory()).absoluteFilePath(relative);
+        const QFileInfo info(absolute);
+        if (!info.exists() || !info.isFile())
+            continue;
+        if (!isPathInside(info.absoluteFilePath(), assetsRoot))
+            continue;
+        QFile::remove(info.absoluteFilePath());
+    }
 }
 
 QByteArray DocumentSession::annotationsFingerprint() const

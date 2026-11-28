@@ -10,6 +10,9 @@
         <file>icons/download.svg</file>
         <file>icons/eraser.svg</file>
         <file>icons/external-link.svg</file>
+        <file>icons/link.svg</file>
+        <file>icons/unlink.svg</file>
+        <file>icons/folder-input.svg</file>
         <file>icons/file-plus.svg</file>
         <file>icons/file-text.svg</file>
         <file>icons/folder-plus.svg</file>

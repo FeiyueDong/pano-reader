@@ -1580,12 +1580,9 @@ void PdfView::mousePressEvent(QMouseEvent *event)
     }
 
     if (m_tool == Tool::Note) {
-        Annotation annotation = makeBaseAnnotation(AnnotationType::NotePoint, pageIndex);
-        annotation.p1 = pagePoint;
-        annotation.rect = QRectF(pagePoint, QSizeF(0.0, 0.0));
-        annotation.style.strokeColor = m_defaultStyle.strokeColor;
-        addAnnotation(annotation, true);
-        emit noteRequested(annotation.id);
+        // R04: a click only proposes a location. No NotePoint enters the formal
+        // AnnotationModel until the editor draft is saved successfully.
+        emit notePointRequested(pageIndex, pagePoint, m_defaultStyle);
         return;
     }
 

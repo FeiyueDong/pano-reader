@@ -697,11 +697,11 @@ void MainWindow::onTabChanged(int index)
     else if (auto *workspace = qobject_cast<ReaderWorkspace *>(m_tabs->widget(index)))
         setShortcutScope(workspace->view());
 
+    // R01: switching tabs must not submit or close an editor draft. Only
+    // formal reading data is flushed here.
     for (DocumentSession *session : m_sessions) {
         if (session->workspace() == m_tabs->currentWidget())
             continue;
-        if (session->workspace()->isEditingNote())
-            session->workspace()->commitNoteEdit();
         if (session->isDirty())
             session->flush();
     }
@@ -719,6 +719,8 @@ void MainWindow::onTabCloseRequested(int index)
     auto *workspace = qobject_cast<ReaderWorkspace *>(m_tabs->widget(index));
     DocumentSession *session = workspace ? workspace->session() : nullptr;
     if (!session)
+        return;
+    if (!session->workspace()->prepareToClose())
         return;
     if (!saveSession(session, true))
         return;
@@ -742,8 +744,8 @@ bool MainWindow::saveSession(DocumentSession *session, bool promptOnFailure)
 {
     if (!session)
         return true;
-    if (session->workspace()->isEditingNote())
-        session->workspace()->commitNoteEdit();
+    // Save commands only persist formal data. A note draft is owned by the
+    // editor and is handled by prepareToClose() on destructive lifecycle paths.
     if (!session->isDirty())
         return true;
     QString error;
@@ -766,7 +768,6 @@ void MainWindow::saveCurrent()
         setStatus(tr("当前没有打开的书籍。"));
         return;
     }
-    session->workspace()->commitNoteEdit();
     QString error;
     if (!session->saveNow(&error))
         showError(tr("保存失败"), error);
@@ -777,6 +778,8 @@ bool MainWindow::closeSessionForBook(const QString &bookId)
     for (DocumentSession *session : std::as_const(m_sessions)) {
         if (session->bookId() != bookId)
             continue;
+        if (!session->workspace()->prepareToClose())
+            return false;
         if (!saveSession(session, true))
             return false;
         const int index = m_tabs->indexOf(session->workspace());
@@ -798,6 +801,8 @@ bool MainWindow::closeAllSessions(bool prompt)
 {
     const QVector<DocumentSession *> sessions = m_sessions;
     for (DocumentSession *session : sessions) {
+        if (!session->workspace()->prepareToClose())
+            return false;
         if (!saveSession(session, prompt))
             return false;
     }

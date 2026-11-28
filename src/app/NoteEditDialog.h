@@ -2,6 +2,9 @@
 
 #include <QDialog>
 
+#include <QSet>
+
+#include "annotation/Annotation.h"
 #include "note/Note.h"
 
 class QComboBox;
@@ -27,13 +30,19 @@ class NoteEditDialog : public QDialog
 
 public:
     explicit NoteEditDialog(DocumentSession *session, QWidget *parent = nullptr);
+    ~NoteEditDialog() override;
 
     void openNewNote(const QString &parentGroupId, const QString &annotationId = QString());
+    void openNewNoteAtPoint(const QString &parentGroupId, int pageIndex, const QPointF &pagePoint,
+                            const AnnotationStyle &style);
     void openExistingNote(const QString &noteId);
     QString currentNoteId() const { return m_note.id; }
     bool hasUnsavedChanges() const { return m_dirty; }
     bool commitIfDirty(QString *errorMessage);
+    bool prepareToClose(QString *errorMessage);
     void insertMarkdown(const QString &text);
+    void insertAssetMarkdown(const QString &relativePath, const QString &altText);
+    DocumentSession *session() const { return m_session; }
 
 signals:
     void saved(const QString &noteId);
@@ -43,23 +52,34 @@ signals:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
+    void done(int result) override;
 
 private:
     void updateHeader();
+    void loadEditorContent();
+    void cleanupDraftAssets();
     bool saveInternal(bool closeAfter, QString *errorMessage = nullptr);
+    bool confirmSwitchTarget(const QString &targetNoteId);
     void requestClose();
     void schedulePreview();
     void refreshPreview();
-    void regenerateMarkdown();
     void applyMode(int mode);
     void insertImageData(const QImage &image);
 
     DocumentSession *m_session = nullptr;
     Note m_note;
     QString m_parentGroupId;
+    int m_pendingPageIndex = -1;
+    QPointF m_pendingPagePoint;
+    AnnotationStyle m_pendingPointStyle;
+    bool m_createNotePoint = false;
     bool m_isNew = false;
     bool m_dirty = false;
     bool m_closing = false;
+    bool m_closedEmitted = false;
+    QSet<QString> m_draftAssets;
+    QSet<QString> m_committedAssets;
 
     QLabel *m_headerLabel = nullptr;
     QLabel *m_linkLabel = nullptr;

@@ -89,3 +89,17 @@ Demo 默认关闭，由两个独立根选项按需包含：
   回归时同时运行 Phase 1/2 探针。
 - 新版笔记协议不兼容 `~/Documents/pano` 中已有旧数据；不要直接向用户书库写入新格式。
   测试使用临时书库或经确认的新测试书库，旧格式拒绝测试使用临时副本。
+
+## Phase 3.2.1 笔记数据安全
+
+- 编辑器草稿不属于正式数据。自动保存、主窗口保存、切换标签/书籍不得隐式提交草稿；
+  只有 `NoteEditDialog` 的显式保存，或关闭/退出时明确选择“保存”，才调用
+  `DocumentSession::commitNoteDraft()`。
+- 笔记保存先写 `annotations.json`，成功后才发布 Note/NoteTree/NotePoint 模型并入撤销栈；
+  写入失败或外部文件指纹变化时保留草稿，不得先改内存再补写。
+- 取消新建定位笔记不得留下 NotePoint、Note、树节点或 undo 项。草稿插入但未提交的
+  `assets/` 文件按 `NoteEditDialog` 的 `m_draftAssets` 清理，已保存附件不得误删。
+- 导出与 Markdown 资源路径必须拒绝越界、绝对路径、UNC/盘符、符号链接和覆盖已有目标；
+  导入图片限制大小与像素数。
+- `src/buildcfg/*.lua` 是模块目标定义，根 `src/xmake.lua` 只负责包含；新增库或源文件时同步
+  更新对应模块。

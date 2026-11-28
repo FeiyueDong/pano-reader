@@ -1,0 +1,10 @@
+local project_src = path.join(os.projectdir(), "src")
+
+target("pano-annotation")
+    add_rules("qt.static")
+    add_files(path.join(project_src, "annotation/*.cpp"))
+    add_files(path.join(project_src, "annotation/*.h"))
+    add_frameworks("QtCore", "QtGui")
+    add_deps("pano-common")
+    add_includedirs(project_src)
+    set_encodings("utf-8")

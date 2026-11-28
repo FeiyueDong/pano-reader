@@ -75,6 +75,7 @@ public:
     void navigateForward();
     void clearNavigationHistory();
     void addBookmarkHere();
+    bool prepareToClose();
     void exportNoteMarkdown(const QString &noteId, const QString &path, QString *error);
     void exportBookMarkdown(const QString &directory, QString *error);
     void exportBookJson(const QString &path, QString *error);
@@ -87,6 +88,7 @@ private slots:
     void onAnnotationsChanged();
     void onSelectionChanged(const QString &annotationId);
     void onNoteRequested(const QString &annotationId);
+    void onNotePointRequested(int pageIndex, const QPointF &pagePoint, const AnnotationStyle &style);
     void onNoteDeleteRequested(const QString &annotationId);
     void onNoteListItemActivated(QListWidgetItem *item);
     void onToolChanged(PdfView::Tool tool);
@@ -173,6 +175,7 @@ private:
     void updateNotePreview();
     void openNoteForAnnotation(const QString &annotationId);
     void openNoteEditor(const QString &noteId);
+    void ensureNoteDialog();
     void createIndependentNote(const QString &parentGroupId = QString());
     void createGroupUnder(const QString &parentGroupId = QString());
     void renameSelectedNoteNode();
@@ -188,12 +191,11 @@ private:
     PdfView *m_view = nullptr;
     NoteEditDialog *m_noteDialog = nullptr;
     QTreeWidget *m_noteTreeWidget = nullptr;
+    bool m_noteTreeInitialized = false;
     MarkdownPreview *m_notePreview = nullptr;
     QLabel *m_noteInfoLabel = nullptr;
     QLineEdit *m_noteFilterEdit = nullptr;
     QComboBox *m_noteSortCombo = nullptr;
-    QString m_pendingNoteAnnotationId;
-    bool m_pendingNoteAnnotationIsNew = false;
     RegionCaptureOverlay *m_captureOverlay = nullptr;
     QWidget *m_textFloat = nullptr;
     QWidget *m_regionFloat = nullptr;
