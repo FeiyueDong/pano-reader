@@ -62,6 +62,11 @@ private:
     QCheckBox *m_restoreTabs = nullptr;
     QCheckBox *m_restoreLibrary = nullptr;
     QSpinBox *m_autosaveSpin = nullptr;
+    QComboBox *m_layoutCombo = nullptr;
+    QComboBox *m_defaultZoomCombo = nullptr;
+    QCheckBox *m_firstPageCheck = nullptr;
+    QSpinBox *m_pageGapSpin = nullptr;
+    QCheckBox *m_wheelTurnsCheck = nullptr;
     QComboBox *m_importModeCombo = nullptr;
     QPushButton *m_strokeButton = nullptr;
     QCheckBox *m_presetStrokeCheck = nullptr;

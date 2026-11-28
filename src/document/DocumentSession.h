@@ -6,6 +6,7 @@
 #include <QString>
 
 #include "library/LibraryTypes.h"
+#include "document/BookmarkStore.h"
 
 class QTimer;
 
@@ -42,6 +43,8 @@ public:
     ReaderWorkspace *workspace() const { return m_workspace; }
     SettingsManager *settings() const { return m_settings; }
     ToolPresets *toolPresets() const;
+    BookmarkStore *bookmarks() { return &m_bookmarkStore; }
+    bool saveBookmarks(QString *errorMessage = nullptr);
     QString assetsDirectory() const;
     QString bookDirectory() const;
 
@@ -89,6 +92,7 @@ private:
     ZoomMode m_zoomMode = ZoomMode::Fixed;
     int m_autosaveDelayMs = 2000;
     QByteArray m_annotationsFingerprint;
+    BookmarkStore m_bookmarkStore;
 };
 
 } // namespace pano

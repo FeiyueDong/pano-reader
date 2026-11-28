@@ -1,5 +1,7 @@
 #include "settings/SettingsManager.h"
 
+#include "reader/PageLayout.h"
+
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -54,6 +56,20 @@ void SettingsManager::load()
             m_settings.defaultImportMode = mode;
             m_settings.libraryCoverView =
                 root.value(QStringLiteral("library_cover_view")).toBool(true);
+            const QString layout = root.value(QStringLiteral("default_layout_mode"))
+                                       .toString(QStringLiteral("continuous_single"));
+            PageLayoutMode layoutMode = PageLayoutMode::ContinuousSingle;
+            if (pageLayoutModeFromString(layout, &layoutMode))
+                m_settings.defaultLayoutMode = pageLayoutModeToString(layoutMode);
+            ZoomMode defaultZoom = ZoomMode::FitPage;
+            zoomModeFromString(root.value(QStringLiteral("default_zoom_mode"))
+                                   .toString(QStringLiteral("fit_page")), &defaultZoom);
+            m_settings.defaultZoomMode = defaultZoom;
+            m_settings.firstPageAlone =
+                root.value(QStringLiteral("first_page_alone")).toBool(true);
+            m_settings.pageGap = qBound(8, root.value(QStringLiteral("page_gap")).toInt(16), 64);
+            m_settings.wheelTurnsPage =
+                root.value(QStringLiteral("wheel_turns_page")).toBool(false);
         }
     }
 
@@ -77,7 +93,7 @@ void SettingsManager::load()
             m_settings.readerRightVisible =
                 root.value(QStringLiteral("reader_right_visible")).toBool(true);
             m_settings.readerLeftWidth =
-                qBound(240, root.value(QStringLiteral("reader_left_width")).toInt(280), 460);
+                qBound(340, root.value(QStringLiteral("reader_left_width")).toInt(360), 560);
             m_settings.readerRightWidth =
                 qBound(260, root.value(QStringLiteral("reader_right_width")).toInt(340), 560);
             m_settings.lastOpenBooks.clear();
@@ -106,6 +122,11 @@ bool SettingsManager::save(QString *errorMessage)
     general.insert(QStringLiteral("autosave_seconds"), m_settings.autosaveSeconds);
     general.insert(QStringLiteral("default_import_mode"), importModeToString(m_settings.defaultImportMode));
     general.insert(QStringLiteral("library_cover_view"), m_settings.libraryCoverView);
+    general.insert(QStringLiteral("default_layout_mode"), m_settings.defaultLayoutMode);
+    general.insert(QStringLiteral("default_zoom_mode"), zoomModeToString(m_settings.defaultZoomMode));
+    general.insert(QStringLiteral("first_page_alone"), m_settings.firstPageAlone);
+    general.insert(QStringLiteral("page_gap"), m_settings.pageGap);
+    general.insert(QStringLiteral("wheel_turns_page"), m_settings.wheelTurnsPage);
 
     QJsonObject workspace;
     workspace.insert(QStringLiteral("format"), QStringLiteral("pano-settings-workspace"));
@@ -209,6 +230,29 @@ void SettingsManager::setLibraryPanelState(bool navVisible, bool infoVisible,
     m_settings.libraryInfoVisible = infoVisible;
     m_settings.libraryNavWidth = navWidth;
     m_settings.libraryInfoWidth = infoWidth;
+}
+
+void SettingsManager::setDefaultReadingLayout(const QString &layoutMode, ZoomMode zoomMode,
+                                              bool firstPageAlone)
+{
+    PageLayoutMode parsed = PageLayoutMode::ContinuousSingle;
+    if (pageLayoutModeFromString(layoutMode, &parsed))
+        m_settings.defaultLayoutMode = pageLayoutModeToString(parsed);
+    m_settings.defaultZoomMode = zoomMode;
+    m_settings.firstPageAlone = firstPageAlone;
+    emit settingsChanged();
+}
+
+void SettingsManager::setPageGap(int gap)
+{
+    m_settings.pageGap = qBound(8, gap, 64);
+    emit settingsChanged();
+}
+
+void SettingsManager::setWheelTurnsPage(bool enabled)
+{
+    m_settings.wheelTurnsPage = enabled;
+    emit settingsChanged();
 }
 
 void SettingsManager::setReaderPanelState(bool leftVisible, bool rightVisible,

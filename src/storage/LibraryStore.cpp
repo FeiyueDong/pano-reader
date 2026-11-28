@@ -465,6 +465,14 @@ bool LibraryStore::loadReadingFile(const QString &path, LibraryData *data, QStri
         if (!zoomModeFromString(object.value(QStringLiteral("zoom_mode")).toString(), &mode))
             mode = ZoomMode::Fixed;
         state.zoomMode = mode;
+        state.layoutMode = object.value(QStringLiteral("layout_mode")).toString(QStringLiteral("continuous"));
+        if (state.layoutMode != QLatin1String("single")
+            && state.layoutMode != QLatin1String("continuous")
+            && state.layoutMode != QLatin1String("facing")
+            && state.layoutMode != QLatin1String("continuous_facing")) {
+            state.layoutMode = QStringLiteral("continuous");
+        }
+        state.firstPageAlone = object.value(QStringLiteral("first_page_alone")).toBool(true);
         state.valid = true;
         data->reading.insert(it.key(), state);
     }
@@ -559,6 +567,8 @@ bool LibraryStore::saveReadingState(const LibraryData &data, QString *errorMessa
         object.insert(QStringLiteral("zoom"), state.zoom);
         object.insert(QStringLiteral("zoom_mode"), zoomModeToString(state.zoomMode));
         object.insert(QStringLiteral("rotation"), state.rotation);
+        object.insert(QStringLiteral("layout_mode"), state.layoutMode);
+        object.insert(QStringLiteral("first_page_alone"), state.firstPageAlone);
         object.insert(QStringLiteral("updated_at"), state.updatedAt);
         books.insert(it.key(), object);
     }

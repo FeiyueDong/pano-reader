@@ -1,5 +1,7 @@
 #include "settings/SettingsDialog.h"
 
+#include "reader/PageLayout.h"
+
 #include <QApplication>
 #include <QCheckBox>
 #include <QColorDialog>
@@ -154,6 +156,26 @@ QWidget *SettingsDialog::buildReadingTab()
     m_autosaveSpin->setRange(1, 30);
     m_autosaveSpin->setSuffix(tr(" 秒"));
     form->addRow(tr("标注自动保存延迟"), m_autosaveSpin);
+
+    m_layoutCombo = new QComboBox(box);
+    m_layoutCombo->addItem(tr("单页"), static_cast<int>(PageLayoutMode::SinglePage));
+    m_layoutCombo->addItem(tr("连续单页"), static_cast<int>(PageLayoutMode::ContinuousSingle));
+    m_layoutCombo->addItem(tr("双页"), static_cast<int>(PageLayoutMode::FacingPages));
+    m_layoutCombo->addItem(tr("连续双页"), static_cast<int>(PageLayoutMode::ContinuousFacing));
+    form->addRow(tr("默认页面布局"), m_layoutCombo);
+    m_defaultZoomCombo = new QComboBox(box);
+    m_defaultZoomCombo->addItem(tr("适合页面"), static_cast<int>(ZoomMode::FitPage));
+    m_defaultZoomCombo->addItem(tr("适合宽度"), static_cast<int>(ZoomMode::FitWidth));
+    m_defaultZoomCombo->addItem(tr("固定比例"), static_cast<int>(ZoomMode::Fixed));
+    form->addRow(tr("默认缩放模式"), m_defaultZoomCombo);
+    m_firstPageCheck = new QCheckBox(tr("双页布局首页单独显示"), box);
+    form->addRow(m_firstPageCheck);
+    m_pageGapSpin = new QSpinBox(box);
+    m_pageGapSpin->setRange(8, 64);
+    m_pageGapSpin->setSuffix(tr(" px"));
+    form->addRow(tr("页面间距"), m_pageGapSpin);
+    m_wheelTurnsCheck = new QCheckBox(tr("滚动到页边界后滚轮翻页"), box);
+    form->addRow(m_wheelTurnsCheck);
 
     layout->addWidget(box);
     auto *note = new QLabel(tr("自动保存最长等待 30 秒；切换标签、关闭窗口和切换书库时会立即保存。"), widget);
@@ -327,6 +349,19 @@ void SettingsDialog::loadValues()
     m_restoreLibrary->setChecked(settings.restoreLastLibrary);
     m_restoreTabs->setChecked(settings.restoreOpenTabs);
     m_autosaveSpin->setValue(settings.autosaveSeconds);
+    if (m_layoutCombo) {
+        PageLayoutMode layoutMode = PageLayoutMode::ContinuousSingle;
+        pageLayoutModeFromString(settings.defaultLayoutMode, &layoutMode);
+        const int index = m_layoutCombo->findData(static_cast<int>(layoutMode));
+        if (index >= 0)
+            m_layoutCombo->setCurrentIndex(index);
+        const int zoomIndex = m_defaultZoomCombo->findData(static_cast<int>(settings.defaultZoomMode));
+        if (zoomIndex >= 0)
+            m_defaultZoomCombo->setCurrentIndex(zoomIndex);
+        m_firstPageCheck->setChecked(settings.firstPageAlone);
+        m_pageGapSpin->setValue(settings.pageGap);
+        m_wheelTurnsCheck->setChecked(settings.wheelTurnsPage);
+    }
     if (m_importModeCombo) {
         const int index = m_importModeCombo->findData(static_cast<int>(settings.defaultImportMode));
         if (index >= 0)
@@ -432,6 +467,15 @@ void SettingsDialog::commitSettings()
     m_settings->setRestoreLastLibrary(m_restoreLibrary->isChecked());
     m_settings->setRestoreOpenTabs(m_restoreTabs->isChecked());
     m_settings->setAutosaveSeconds(m_autosaveSpin->value());
+    if (m_layoutCombo) {
+        PageLayoutMode layoutMode = static_cast<PageLayoutMode>(
+            m_layoutCombo->currentData().toInt());
+        const ZoomMode zoomMode = static_cast<ZoomMode>(m_defaultZoomCombo->currentData().toInt());
+        m_settings->setDefaultReadingLayout(pageLayoutModeToString(layoutMode),
+                                            zoomMode, m_firstPageCheck->isChecked());
+        m_settings->setPageGap(m_pageGapSpin->value());
+        m_settings->setWheelTurnsPage(m_wheelTurnsCheck->isChecked());
+    }
     if (m_importModeCombo)
         m_settings->setDefaultImportMode(
             static_cast<ImportMode>(m_importModeCombo->currentData().toInt()));
@@ -467,6 +511,11 @@ void SettingsDialog::restoreAppliedSettings()
         m_settings->setAutosaveSeconds(m_appliedSettings.autosaveSeconds);
         m_settings->setDefaultImportMode(m_appliedSettings.defaultImportMode);
         m_settings->setLastLibraryPath(m_appliedSettings.lastLibraryPath);
+        m_settings->setDefaultReadingLayout(m_appliedSettings.defaultLayoutMode,
+                                            m_appliedSettings.defaultZoomMode,
+                                            m_appliedSettings.firstPageAlone);
+        m_settings->setPageGap(m_appliedSettings.pageGap);
+        m_settings->setWheelTurnsPage(m_appliedSettings.wheelTurnsPage);
     }
     if (m_themes) {
         ThemeId original = ThemeId::ModernLight;

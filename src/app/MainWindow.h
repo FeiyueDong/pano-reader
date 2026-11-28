@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QByteArray>
 #include <QMainWindow>
 #include <QVector>
 
@@ -36,6 +37,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dropEvent(QDropEvent *event) override;
 
@@ -53,6 +55,7 @@ private slots:
     void updateActions();
     void updateSessionStatus();
     void showPreferences();
+    void toggleFullscreen();
     void showShortcuts();
     void showAbout();
     void showDiagnostics();
@@ -120,12 +123,19 @@ private:
     QAction *m_shortcutsAction = nullptr;
     QAction *m_aboutAction = nullptr;
     QAction *m_diagnosticsAction = nullptr;
+    QAction *m_fullscreenAction = nullptr;
     QActionGroup *m_toolGroup = nullptr;
     QVector<QAction *> m_toolActions;
     QSpinBox *m_pageSpin = nullptr;
     QComboBox *m_zoomCombo = nullptr;
     QLabel *m_pageLabel = nullptr;
     QWidget *m_shortcutView = nullptr;
+    bool m_fullscreen = false;
+    QByteArray m_savedWindowState;
+    QByteArray m_savedGeometry;
+    bool m_savedMenuVisible = true;
+    bool m_savedStatusVisible = true;
+    bool m_savedTabBarVisible = true;
 };
 
 } // namespace pano

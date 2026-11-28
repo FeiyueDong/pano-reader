@@ -1,4 +1,4 @@
-# PANO Phase 1 数据格式规范
+# PANO Phase 1/2 数据格式规范
 
 本规范描述 PANO 正式版书库、书籍、标注与本机配置的持久化格式。实现代码位于
 `src/storage/`、`src/library/`、`src/settings/` 和 `src/annotation/`。
@@ -26,6 +26,7 @@
     <book directory>/
       document.json
       annotations.json
+      bookmarks.json        # Phase 2；首次添加书签时创建
       source.pdf            # 仅拷贝模式
       cover.png
       assets/               # 笔记图片、截图
@@ -35,6 +36,7 @@
     reading.json
     history.json
   .pano.lock
+  .pending-delete/          # Phase 2 永久删除隔离与恢复标记
 ```
 
 书库根目录由用户选择；缓存和日志不得写入书库。本机配置位于 Qt 的配置目录
@@ -218,6 +220,8 @@
       "page_point": [297.64, 421.13],
       "zoom": 1.5,
       "zoom_mode": "fixed",
+      "layout_mode": "continuous",
+      "first_page_alone": true,
       "rotation": 90,
       "updated_at": "2026-11-27T08:40:00.000Z"
     }
@@ -225,10 +229,12 @@
 }
 ```
 
-`zoom_mode` 为 `fixed`、`fit_width` 或 `fit_page`；`rotation` 只能为
+`zoom_mode` 为 `fixed`、`fit_width` 或 `fit_page`；`layout_mode` 为 `single`、
+`continuous`、`facing` 或 `continuous_facing`，旧数据缺省为 `continuous`；
+`first_page_alone` 仅影响双页布局，旧数据缺省为 `true`；`rotation` 只能为
 0/90/180/270。`page_point` 是可选的阅读锚点，单位为**未旋转页面 pt**，表示打开时
 视口中心所在的页面位置；省略或无效时回退到 `page_index` 的页首，兼容 Phase 1 旧
-数据。无状态或状态无效时回到第一页、固定比例。
+数据。无状态或状态无效时回到第一页、连续单页、固定比例。
 
 页面切换、缩放、旋转和同页滚动会更新阅读状态；滚动只更新阅读状态，不重写标注文件。
 
@@ -244,15 +250,42 @@
 }
 ```
 
+### 7.1 书签
+
+`books/<book>/bookmarks.json`：
+
+```json
+{
+  "format": "pano-bookmarks",
+  "schema_version": 1,
+  "book_id": "0e9b4d3a-6f6f-4c86-9d5c-1f0b2f46f1a1",
+  "bookmarks": [
+    {
+      "id": "4f1c2e5a-0b7a-4d0e-9b2a-3c5d6e7f8a90",
+      "title": "第 3 页",
+      "page_index": 2,
+      "position": {"x": 297.64, "y": 421.13},
+      "created_at": "2026-11-28T08:00:00.000Z"
+    }
+  ]
+}
+```
+
+`page_index` 从 0 开始，`position` 为未旋转页面 pt 坐标；书签文件按书籍目录独立保存，
+`book_id` 必须与 `document.json` 一致。文件不存在视为空书签；外部修改检测和
+`QSaveFile` 原子写入与标注相同。Phase 1 旧书库没有该文件时保持为空，不自动创建，
+直到用户第一次添加书签。
+
 ## 8. 本机配置
 
 本机配置不放进书库，避免随书库同步或分享：
 
 - `general.json`：`format: pano-settings-general`，包含主题键、界面字号、恢复上次书库、
-  恢复打开标签、自动保存秒数、默认导入方式、书库封面/列表视图。
+  恢复打开标签、自动保存秒数、默认导入方式、书库封面/列表视图、默认布局、默认缩放
+  模式、首页单独、页间距和滚轮翻页。
 - `workspace.json`：`format: pano-settings-workspace`，包含上次书库路径、上次书籍 ID、
   打开书籍 ID 列表、书库三栏和阅读器左右栏的宽度与可见性。
-- `tools.json`：`format: pano-tool-presets`，按工具保存新标注预设；不属于书库，不随
+- `tools.json`：`format: pano-tool-presets`，按工具保存新标注预设和橡皮半径；不属于书库，不随
   书库分享。字段与该工具的 `AnnotationStyle` 一致（含 `line_style` 与
   `stroke_enabled`），缺省工具使用内置默认值。
 - `sources.json`：`format: pano-local-sources`，按书库 ID 保存映射模式书籍的本机源文件

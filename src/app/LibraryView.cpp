@@ -1243,7 +1243,7 @@ void LibraryView::dropEvent(QDropEvent *event)
                 return;
             }
         } else if (kind == QStringLiteral("shelf")) {
-            const bool additive = event->keyboardModifiers().testFlag(Qt::ControlModifier);
+            const bool additive = event->modifiers().testFlag(Qt::ControlModifier);
             if (!additive && !sourceShelf.isEmpty() && sourceShelf != targetShelf)
                 ok = m_manager->removeBookFromShelf(sourceShelf, bookId, &error);
             if (ok)

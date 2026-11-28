@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QHash>
+#include <QList>
 #include <QWidget>
 
 #include "annotation/Annotation.h"
@@ -11,6 +12,8 @@ class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
+class QLineEdit;
+class QPdfSearchModel;
 class QListWidget;
 class QListWidgetItem;
 class QPushButton;
@@ -55,9 +58,16 @@ public:
     void refreshAll();
     void flushPendingStyle();
     void reloadToolPreset();
+    void setFullscreenMode(bool fullscreen);
+    bool closeTransientUi();
+    void toggleSearchBar();
+    void navigateBack();
+    void navigateForward();
+    void addBookmarkHere();
 
 signals:
     void statusMessage(const QString &message);
+    void fullscreenRequested();
 
 private slots:
     void onAnnotationsChanged();
@@ -92,6 +102,20 @@ private slots:
     void updatePanelVisibility();
     void persistPanelState();
     void updateFloatingToolBars();
+    void onLayoutModeChanged(PageLayoutMode mode);
+    void onFirstPageAloneChanged(bool firstAlone);
+    void onNavigated(int pageIndex, const QPointF &pagePoint, int reason);
+    void runSearch();
+    void refreshSearchResults();
+    void activateSearchResult(QListWidgetItem *item);
+    void nextSearchResult();
+    void previousSearchResult();
+    void refreshBookmarks();
+    void activateBookmark(QListWidgetItem *item);
+    void addBookmarkAt(int pageIndex, const QPointF &pagePoint);
+    void renameSelectedBookmark();
+    void deleteSelectedBookmark();
+    void updateHistoryActions();
 
 private:
     void buildUi();
@@ -101,6 +125,8 @@ private:
     QToolBar *buildPrimaryToolBar();
     QToolBar *buildContextToolBar();
     QWidget *buildBottomBar();
+    QWidget *buildSearchBar();
+    QWidget *buildBookmarkTab();
     QWidget *buildLeftDock();
     QWidget *buildRightDock();
     QWidget *buildDetailPane();
@@ -145,6 +171,9 @@ private:
     QTimer *m_thumbRefreshTimer = nullptr;
     QHash<int, quint64> m_thumbRequests;
     QListWidget *m_annotationList = nullptr;
+    QListWidget *m_bookmarkList = nullptr;
+    QPushButton *m_bookmarkAddButton = nullptr;
+    QPushButton *m_bookmarkDeleteButton = nullptr;
     QComboBox *m_annotationFilter = nullptr;
     QCheckBox *m_noteOnlyCheck = nullptr;
 
@@ -159,6 +188,8 @@ private:
     QToolButton *m_rightToggle = nullptr;
 
     QSpinBox *m_pageSpin = nullptr;
+    QComboBox *m_layoutCombo = nullptr;
+    QCheckBox *m_firstPageAloneCheck = nullptr;
     QComboBox *m_zoomCombo = nullptr;
     QLabel *m_statusLabel = nullptr;
     QLabel *m_saveStateLabel = nullptr;
@@ -168,6 +199,11 @@ private:
     QAction *m_redoAction = nullptr;
     QAction *m_deleteAction = nullptr;
     QAction *m_captureAction = nullptr;
+    QAction *m_searchAction = nullptr;
+    QAction *m_bookmarkAction = nullptr;
+    QAction *m_backAction = nullptr;
+    QAction *m_forwardAction = nullptr;
+    QAction *m_fullscreenAction = nullptr;
     QHash<QAction *, PdfView::Tool> m_toolActions;
 
     QWidget *m_contextWidget = nullptr;
@@ -187,6 +223,8 @@ private:
     QComboBox *m_lineStyleCombo = nullptr;
     QCheckBox *m_strokeCheck = nullptr;
     QComboBox *m_blendCombo = nullptr;
+    QWidget *m_eraserWidget = nullptr;
+    QSpinBox *m_eraserRadiusSpin = nullptr;
 
     QTimer *m_styleTimer = nullptr;
     QTimer *m_presetTimer = nullptr;
@@ -194,6 +232,13 @@ private:
     QTimer *m_noteMaxTimer = nullptr;
     QTimer *m_panelSaveTimer = nullptr;
     QTimer *m_statusTimer = nullptr;
+    QTimer *m_searchTimer = nullptr;
+    QPdfSearchModel *m_searchModel = nullptr;
+    QWidget *m_searchBar = nullptr;
+    QWidget *m_bottomBar = nullptr;
+    QLineEdit *m_searchEdit = nullptr;
+    QLabel *m_searchCount = nullptr;
+    QListWidget *m_searchResults = nullptr;
 
     QString m_editingId;
     QString m_styleTargetId;
@@ -207,6 +252,13 @@ private:
     bool m_syncingTool = false;
     bool m_noteDirty = false;
     bool m_noteMaxStarted = false;
+    bool m_fullscreen = false;
+    QList<int> m_fullscreenSplitterSizes;
+    bool m_fullscreenLeftVisible = true;
+    bool m_fullscreenRightVisible = true;
+    struct NavPoint { int page = 0; QPointF point; };
+    QVector<NavPoint> m_history;
+    int m_historyIndex = -1;
 };
 
 } // namespace pano

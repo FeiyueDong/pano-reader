@@ -26,8 +26,13 @@ struct AppSettings {
     int libraryInfoWidth = 340;
     bool readerLeftVisible = true;
     bool readerRightVisible = true;
-    int readerLeftWidth = 280;
+    int readerLeftWidth = 360;
     int readerRightWidth = 340;
+    QString defaultLayoutMode = QStringLiteral("continuous_single");
+    ZoomMode defaultZoomMode = ZoomMode::FitPage;
+    bool firstPageAlone = true;
+    int pageGap = 16;
+    bool wheelTurnsPage = false;
 };
 
 class SettingsManager : public QObject
@@ -57,6 +62,9 @@ public:
     void setLibraryCoverView(bool cover);
     void setLibraryPanelState(bool navVisible, bool infoVisible, int navWidth, int infoWidth);
     void setReaderPanelState(bool leftVisible, bool rightVisible, int leftWidth, int rightWidth);
+    void setDefaultReadingLayout(const QString &layoutMode, ZoomMode zoomMode, bool firstPageAlone);
+    void setPageGap(int gap);
+    void setWheelTurnsPage(bool enabled);
 
     ToolPresets *toolPresets() { return &m_toolPresets; }
     const ToolPresets *toolPresets() const { return &m_toolPresets; }

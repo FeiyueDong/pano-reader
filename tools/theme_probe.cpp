@@ -4,6 +4,7 @@
 #include <QTimer>
 #include <QEventLoop>
 #include <QComboBox>
+#include <QTabWidget>
 #include <cstdio>
 #include <cstdio>
 
@@ -76,6 +77,13 @@ int main(int argc, char **argv)
     dialog.show();
     waitFor(120);
     dialog.grab().save(QStringLiteral("build/probe/settings-dialog.png"));
+    if (auto *tabs = dialog.findChild<QTabWidget *>()) {
+        if (tabs->count() > 2) {
+            tabs->setCurrentIndex(2);
+            waitFor(80);
+            dialog.grab().save(QStringLiteral("build/probe/settings-dialog-reading.png"));
+        }
+    }
     const QString originalTheme = dialogSettings.settings().themeKey;
     for (QComboBox *combo : dialog.findChildren<QComboBox *>()) {
         const int warmIndex = combo->findData(QStringLiteral("warm"));

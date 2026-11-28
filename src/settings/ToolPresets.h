@@ -24,6 +24,8 @@ public:
     void setStyle(const QString &toolId, const AnnotationStyle &style);
     void reset(const QString &toolId);
     void resetAll();
+    int eraserRadius() const { return m_eraserRadius; }
+    void setEraserRadius(int radius);
 
     bool load(QString *warningMessage = nullptr);
     bool save(QString *errorMessage = nullptr) const;
@@ -31,6 +33,7 @@ public:
 
 private:
     QHash<QString, AnnotationStyle> m_styles;
+    int m_eraserRadius = 12;
 };
 
 } // namespace pano

@@ -187,6 +187,7 @@ bool ToolPresets::load(QString *warningMessage)
             *warningMessage = QStringLiteral("工具预设文件格式或版本不受支持，已保留原文件并使用内置默认值。");
         return false;
     }
+    m_eraserRadius = qBound(4, object.value(QStringLiteral("eraser_radius")).toInt(12), 25);
     const QJsonObject presets = object.value(QStringLiteral("presets")).toObject();
     for (auto it = presets.begin(); it != presets.end(); ++it) {
         if (!isValidToolId(it.key()) || !it.value().isObject())
@@ -206,6 +207,7 @@ bool ToolPresets::save(QString *errorMessage) const
     QJsonObject root;
     root.insert(QStringLiteral("format"), QStringLiteral("pano-tool-presets"));
     root.insert(QStringLiteral("schema_version"), 1);
+    root.insert(QStringLiteral("eraser_radius"), m_eraserRadius);
     root.insert(QStringLiteral("presets"), presets);
     const QString path = filePath();
     if (!ensureDirectory(QFileInfo(path).absolutePath(), errorMessage))
@@ -213,6 +215,11 @@ bool ToolPresets::save(QString *errorMessage) const
     if (!writeJsonObjectAtomic(path, root, errorMessage))
         return false;
     return true;
+}
+
+void ToolPresets::setEraserRadius(int radius)
+{
+    m_eraserRadius = qBound(4, radius, 25);
 }
 
 } // namespace pano

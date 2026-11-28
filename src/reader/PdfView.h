@@ -5,6 +5,7 @@
 #include <optional>
 #include <QPdfSelection>
 #include <QPointer>
+#include <QSet>
 #include <QUndoStack>
 #include <QVector>
 
@@ -12,6 +13,7 @@
 #include "annotation/AnnotationModel.h"
 #include "pdf/PdfDocument.h"
 #include "pdf/PageRenderer.h"
+#include "library/LibraryTypes.h"
 #include "reader/PageLayout.h"
 
 class QRubberBand;
@@ -40,6 +42,25 @@ public:
         Note
     };
     Q_ENUM(Tool)
+
+    enum class NavigationAlignment {
+        PageTop,
+        Center
+    };
+
+    enum class NavigationReason {
+        Programmatic,
+        Restore,
+        History,
+        Outline,
+        Thumbnail,
+        Search,
+        Bookmark,
+        Annotation,
+        PageInput,
+        Internal
+    };
+    Q_ENUM(NavigationReason)
 
     explicit PdfView(QWidget *parent = nullptr);
     ~PdfView() override;
@@ -72,9 +93,24 @@ public:
     void setRotation(int degrees);
     void rotateBy(int degrees);
 
+    const PageLayout &layout() const { return m_layout; }
+    PageLayoutMode layoutMode() const;
+    void setLayoutMode(PageLayoutMode mode);
+    bool firstPageAlone() const;
+    void setFirstPageAlone(bool firstAlone);
+    int pageGap() const;
+    void setPageGap(int gap);
+    bool wheelTurnsPage() const;
+    void setWheelTurnsPage(bool enabled);
+    ZoomMode zoomMode() const { return m_zoomMode; }
+    void setZoomMode(ZoomMode mode);
+
     int currentPage() const { return m_currentPage; }
     void goToPage(int pageIndex);
     void goToPosition(int pageIndex, const QPointF &pagePoint);
+    void navigateTo(int pageIndex, const QPointF &pagePoint = QPointF(),
+                    NavigationAlignment alignment = NavigationAlignment::PageTop,
+                    NavigationReason reason = NavigationReason::Programmatic);
     QPointF viewportAnchor(int *pageIndex) const;
     void restoreViewportAnchor(int pageIndex, const QPointF &pagePoint);
     void revealPageRegion(int pageIndex, const QRectF &pageBounds);
@@ -100,12 +136,27 @@ public:
     bool hasTextSelection() const;
     bool hasRegionSelection() const;
     void clearTemporarySelections();
+    bool handleEscape();
+    bool copySelectionOrAnnotation();
+    bool pasteAnnotation(const QPointF &viewPos = QPointF());
+    bool duplicateSelected();
+    void setEraserRadius(int radius);
+    void setSearchHighlights(const QHash<int, QVector<QRectF>> &highlights,
+                             int currentPage = -1, const QRectF &currentRect = QRectF());
+    void clearSearchHighlights();
+    QImage selectedRegionImage() const;
+    int eraserRadius() const { return m_eraserRadius; }
 
 signals:
     void pageChanged(int pageIndex);
     void readingAnchorChanged();
     void zoomChanged(qreal zoom);
+    void zoomModeChanged(pano::ZoomMode mode);
     void rotationChanged(int degrees);
+    void layoutModeChanged(pano::PageLayoutMode mode);
+    void firstPageAloneChanged(bool firstAlone);
+    void navigated(int pageIndex, const QPointF &pagePoint, int reason);
+    void bookmarkRequested(int pageIndex, const QPointF &pagePoint);
     void toolChanged(PdfView::Tool tool);
     void annotationSelectionChanged(const QString &annotationId);
     void annotationsChanged();
@@ -130,6 +181,7 @@ protected:
     void scrollContentsBy(int dx, int dy) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dropEvent(QDropEvent *event) override;
+    void contextMenuEvent(QContextMenuEvent *event) override;
 
 private:
     enum class DragMode {
@@ -139,7 +191,8 @@ private:
         DragAnnotation,
         ResizeAnnotation,
         DrawShape,
-        DrawPath
+        DrawPath,
+        Erase
     };
 
     QTransform pageToViewTransform(int pageIndex) const;
@@ -156,6 +209,8 @@ private:
     void updateScrollBars();
     void updatePageMetrics();
     void updateCurrentPage();
+    void applyFitZoom();
+    QRectF currentSpreadRect() const;
     void rebuildLayoutAndKeepAnchor(qreal newZoom, int newRotation, const QPointF &viewAnchor);
     void centerPage(int pageIndex);
     void requestRepaint();
@@ -170,7 +225,7 @@ private:
     void beginRegionSelection(const QPointF &viewPos);
     void updateRegionSelection(const QPointF &viewPos);
     void finishRegionSelection();
-    bool textAtPagePoint(const QPointF &pagePoint, int pageIndex) const;
+    bool textAtPagePoint(const QPointF &pagePoint, int pageIndex);
     void updateTextSelection(const QPointF &viewPos);
     void finishTextSelection();
     void beginDraw(int pageIndex, const QPointF &pagePoint);
@@ -186,6 +241,9 @@ private:
     Annotation makeBaseAnnotation(AnnotationType type, int pageIndex) const;
     void addAnnotation(const Annotation &annotation, bool selectAfter);
     void eraseAt(const QPointF &viewPos);
+    void eraseSegment(const QPointF &from, const QPointF &to);
+    void commitErase();
+    QString annotationClipboardJson() const;
     void paintPage(QPainter &painter, int pageIndex, const QRectF &pageRectInView, const QTransform &pageToView);
     void paintSelectionOverlay(QPainter &painter);
     void paintSelectedAnnotationOutline(QPainter &painter);
@@ -203,6 +261,8 @@ private:
     AnnotationStyle m_defaultStyle;
     bool m_styleUserModified = false;
     bool m_fitPending = false;
+    bool m_wheelTurnsPage = false;
+    ZoomMode m_zoomMode = ZoomMode::FitPage;
     QString m_selectedId;
 
     DragMode m_dragMode = DragMode::None;
@@ -225,7 +285,20 @@ private:
     QRectF m_regionSelection;
     int m_regionSelectionPage = -1;
 
-    QPoint m_lastMouseViewPos;
+    QPoint m_lastMouseViewPos = QPoint(-1, -1);
+    QPointF m_eraseLastView;
+    QVector<QPointF> m_drawRawPath;
+    int m_eraserRadius = 12;
+    QSet<QString> m_eraseIds;
+    QVector<Annotation> m_eraseRemoved;
+
+    int m_textHitPage = -1;
+    QPointF m_textHitPoint;
+    bool m_textHitValid = false;
+    bool m_textHitResult = false;
+    QHash<int, QVector<QRectF>> m_searchHighlights;
+    int m_searchCurrentPage = -1;
+    QRectF m_searchCurrentRect;
 };
 
 } // namespace pano

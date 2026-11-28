@@ -10,11 +10,16 @@
 #include <QCursor>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QContextMenuEvent>
+#include <QFileDialog>
 #include <QFileInfo>
+#include <QMenu>
 #include <QKeyEvent>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QPainterPath>
 #include <QScrollBar>
 #include <QUrl>
@@ -160,7 +165,9 @@ bool PdfView::openFile(const QString &filePath, QString *errorMessage)
     m_layout.setPages(m_pageSizes);
     updateScrollBars();
     m_currentPage = 0;
+    m_layout.setCurrentPage(0);
     m_fitPending = true;
+    m_zoomMode = ZoomMode::FitPage;
     fitPage();
 
     emit annotationSelectionChanged(QString());
@@ -210,6 +217,9 @@ void PdfView::setTool(Tool tool)
     m_editId.clear();
     m_dragPage = -1;
     m_textSelecting = false;
+    m_eraseIds.clear();
+    m_eraseRemoved.clear();
+    m_textHitValid = false;
     applyToolPreset(tool);
 
     Qt::CursorShape shape = Qt::ArrowCursor;
@@ -219,8 +229,10 @@ void PdfView::setTool(Tool tool)
         shape = Qt::IBeamCursor;
     else if (tool == Tool::Hand)
         shape = Qt::OpenHandCursor;
-    else if (tool == Tool::Note || tool == Tool::Eraser)
+    else if (tool == Tool::Note)
         shape = Qt::PointingHandCursor;
+    else if (tool == Tool::Eraser)
+        shape = Qt::BlankCursor;
     else if (tool != Tool::Select)
         shape = Qt::CrossCursor;
     viewport()->setCursor(shape);
@@ -329,6 +341,10 @@ qreal PdfView::zoom() const
 void PdfView::setZoom(qreal zoom)
 {
     m_fitPending = false;
+    const bool modeChanged = m_zoomMode != ZoomMode::Fixed;
+    m_zoomMode = ZoomMode::Fixed;
+    if (modeChanged)
+        emit zoomModeChanged(m_zoomMode);
     const qreal clamped = qBound(0.05, zoom, 12.0);
     if (qFuzzyCompare(clamped, m_layout.zoom()))
         return;
@@ -351,14 +367,16 @@ void PdfView::fitWidth()
 {
     if (!hasDocument() || m_pageSizes.isEmpty())
         return;
-    const int page = qBound(0, m_currentPage, m_pageSizes.size() - 1);
-    QSizeF size = m_pageSizes.value(page);
-    if (m_layout.rotation() % 180 != 0)
-        size.transpose();
-    const qreal available = qMax(40.0, viewport()->width() - 2.0 * m_layout.margin() - 8.0);
-    if (size.width() > 0.0)
-        setZoom(available / size.width());
-    goToPage(page);
+    if (viewport()->width() < 120 || viewport()->height() < 120) {
+        m_fitPending = true;
+        m_zoomMode = ZoomMode::FitWidth;
+        emit zoomModeChanged(m_zoomMode);
+        return;
+    }
+    m_fitPending = false;
+    m_zoomMode = ZoomMode::FitWidth;
+    applyFitZoom();
+    emit zoomModeChanged(m_zoomMode);
 }
 
 void PdfView::fitPage()
@@ -369,20 +387,14 @@ void PdfView::fitPage()
     // Defer the fit until the viewport is large enough to produce a useful zoom.
     if (viewport()->width() < 120 || viewport()->height() < 120) {
         m_fitPending = true;
+        m_zoomMode = ZoomMode::FitPage;
+        emit zoomModeChanged(m_zoomMode);
         return;
     }
     m_fitPending = false;
-    const int page = qBound(0, m_currentPage, m_pageSizes.size() - 1);
-    QSizeF size = m_pageSizes.value(page);
-    if (m_layout.rotation() % 180 != 0)
-        size.transpose();
-    const qreal availableW = qMax(40.0, viewport()->width() - 2.0 * m_layout.margin() - 8.0);
-    const qreal availableH = qMax(40.0, viewport()->height() - 2.0 * m_layout.margin() - 8.0);
-    if (size.width() <= 0.0 || size.height() <= 0.0)
-        return;
-    const qreal zoom = qMin(availableW / size.width(), availableH / size.height());
-    setZoom(zoom);
-    centerPage(page);
+    m_zoomMode = ZoomMode::FitPage;
+    applyFitZoom();
+    emit zoomModeChanged(m_zoomMode);
 }
 
 void PdfView::resetZoom()
@@ -404,6 +416,8 @@ void PdfView::setRotation(int degrees)
         return;
     rebuildLayoutAndKeepAnchor(m_layout.zoom(), normalized,
                                QPointF(viewport()->width() / 2.0, viewport()->height() / 2.0));
+    if (m_zoomMode == ZoomMode::FitWidth || m_zoomMode == ZoomMode::FitPage)
+        applyFitZoom();
     emit rotationChanged(m_layout.rotation());
 }
 
@@ -412,6 +426,92 @@ void PdfView::rotateBy(int degrees)
     setRotation(m_layout.rotation() + degrees);
 }
 
+PageLayoutMode PdfView::layoutMode() const
+{
+    return m_layout.layoutMode();
+}
+
+void PdfView::setLayoutMode(PageLayoutMode mode)
+{
+    if (!hasDocument() || m_layout.layoutMode() == mode)
+        return;
+    const QPointF viewAnchor(viewport()->width() / 2.0, viewport()->height() / 2.0);
+    int anchorPage = m_currentPage;
+    QPointF anchorPoint = m_layout.pageToContent(anchorPage).inverted().map(viewToContent(viewAnchor));
+    m_layout.setLayoutMode(mode);
+    m_layout.setCurrentPage(anchorPage);
+    if (m_zoomMode == ZoomMode::FitWidth || m_zoomMode == ZoomMode::FitPage)
+        applyFitZoom();
+    else {
+        updateScrollBars();
+        m_currentPage = anchorPage;
+        restoreViewportAnchor(anchorPage, anchorPoint);
+    }
+    emit layoutModeChanged(mode);
+    emit pageChanged(m_currentPage);
+    viewport()->update();
+}
+
+bool PdfView::firstPageAlone() const
+{
+    return m_layout.firstPageAlone();
+}
+
+void PdfView::setFirstPageAlone(bool firstAlone)
+{
+    if (m_layout.firstPageAlone() == firstAlone)
+        return;
+    const QPointF viewAnchor(viewport()->width() / 2.0, viewport()->height() / 2.0);
+    int anchorPage = m_currentPage;
+    QPointF anchorPoint = m_layout.pageToContent(anchorPage).inverted().map(viewToContent(viewAnchor));
+    m_layout.setFirstPageAlone(firstAlone);
+    m_layout.setCurrentPage(anchorPage);
+    if (m_zoomMode == ZoomMode::FitWidth || m_zoomMode == ZoomMode::FitPage)
+        applyFitZoom();
+    else
+        restoreViewportAnchor(anchorPage, anchorPoint);
+    emit firstPageAloneChanged(firstAlone);
+    viewport()->update();
+}
+
+int PdfView::pageGap() const
+{
+    return m_layout.gap();
+}
+
+void PdfView::setPageGap(int gap)
+{
+    if (m_layout.gap() == gap)
+        return;
+    m_layout.setMargins(m_layout.margin(), gap);
+    rebuildLayoutAndKeepAnchor(m_layout.zoom(), m_layout.rotation(),
+                               viewport()->rect().center());
+}
+
+bool PdfView::wheelTurnsPage() const
+{
+    return m_wheelTurnsPage;
+}
+
+void PdfView::setWheelTurnsPage(bool enabled)
+{
+    m_wheelTurnsPage = enabled;
+}
+
+void PdfView::setZoomMode(ZoomMode mode)
+{
+    if (m_zoomMode == mode && mode != ZoomMode::Fixed) {
+        applyFitZoom();
+        return;
+    }
+    m_zoomMode = mode;
+    if (mode == ZoomMode::FitWidth || mode == ZoomMode::FitPage) {
+        if (!hasDocument())
+            return;
+        applyFitZoom();
+    }
+    emit zoomModeChanged(mode);
+}
 int PdfView::pageCount() const
 {
     return m_pageSizes.size();
@@ -419,16 +519,8 @@ int PdfView::pageCount() const
 
 void PdfView::goToPage(int pageIndex)
 {
-    if (!hasDocument() || m_pageSizes.isEmpty())
-        return;
-    pageIndex = qBound(0, pageIndex, m_pageSizes.size() - 1);
-    const QRectF rect = m_layout.pageRect(pageIndex);
-    horizontalScrollBar()->setValue(qRound(rect.center().x() - viewport()->width() / 2.0));
-    verticalScrollBar()->setValue(qRound(rect.top() - m_layout.margin()));
-    m_currentPage = pageIndex;
-    updateCurrentPage();
-    emit pageChanged(m_currentPage);
-    viewport()->update();
+    navigateTo(pageIndex, QPointF(), NavigationAlignment::PageTop,
+               NavigationReason::PageInput);
 }
 
 QPointF PdfView::viewportAnchor(int *pageIndex) const
@@ -462,34 +554,49 @@ void PdfView::restoreViewportAnchor(int pageIndex, const QPointF &pagePoint)
 {
     if (!hasDocument() || pageIndex < 0 || pageIndex >= pageCount())
         return;
-    if (!pagePoint.isNull())
-        goToPosition(pageIndex, pagePoint);
+    if (!pagePoint.isNull()) {
+        navigateTo(pageIndex, pagePoint, NavigationAlignment::Center,
+                   NavigationReason::Restore);
+    }
 }
 
 void PdfView::goToPosition(int pageIndex, const QPointF &pagePoint)
 {
+    navigateTo(pageIndex, pagePoint, NavigationAlignment::Center,
+               NavigationReason::Programmatic);
+}
+
+void PdfView::navigateTo(int pageIndex, const QPointF &pagePoint,
+                         NavigationAlignment alignment, NavigationReason reason)
+{
     if (!hasDocument() || pageIndex < 0 || pageIndex >= m_pageSizes.size())
+        return;
+
+    const bool pageChangedBefore = pageIndex != m_currentPage;
+    m_currentPage = pageIndex;
+    m_layout.setCurrentPage(pageIndex);
+    if (!m_layout.isContinuous() && m_zoomMode != ZoomMode::Fixed)
+        applyFitZoom();
+    if (m_layout.pageRect(pageIndex).isNull())
         return;
 
     const QPointF point = clampToPage(pagePoint, pageIndex);
     const QPointF contentPoint = m_layout.pageToContent(pageIndex).map(point);
-    const QPointF viewPoint = contentToView(contentPoint);
-    const QRectF viewportRect(0.0, 0.0, viewport()->width(), viewport()->height());
-    const qreal margin = 40.0;
+    const QRectF targetRect = m_layout.isFacing() ? m_layout.spreadRect(pageIndex)
+                                                  : m_layout.pageRect(pageIndex);
 
-    const bool alreadyVisible = viewportRect.adjusted(margin, margin, -margin, -margin)
-                                    .contains(viewPoint);
-    if (!alreadyVisible) {
-        horizontalScrollBar()->setValue(
-            qRound(contentPoint.x() - viewport()->width() / 2.0));
-        verticalScrollBar()->setValue(
-            qRound(contentPoint.y() - viewport()->height() / 2.0));
+    if (alignment == NavigationAlignment::Center && !pagePoint.isNull()) {
+        horizontalScrollBar()->setValue(qRound(contentPoint.x() - viewport()->width() / 2.0));
+        verticalScrollBar()->setValue(qRound(contentPoint.y() - viewport()->height() / 2.0));
+    } else {
+        const QPointF center(targetRect.center().x(), targetRect.top() + m_layout.margin());
+        horizontalScrollBar()->setValue(qRound(center.x() - viewport()->width() / 2.0));
+        verticalScrollBar()->setValue(qRound(targetRect.top() - m_layout.margin()));
     }
 
-    if (pageIndex != m_currentPage) {
-        m_currentPage = pageIndex;
+    if (pageChangedBefore)
         emit pageChanged(m_currentPage);
-    }
+    emit navigated(pageIndex, point, static_cast<int>(reason));
     viewport()->update();
 }
 
@@ -498,6 +605,9 @@ void PdfView::revealPageRegion(int pageIndex, const QRectF &pageBounds)
     if (!hasDocument() || pageIndex < 0 || pageIndex >= m_pageSizes.size())
         return;
 
+    m_layout.setCurrentPage(pageIndex);
+    if (m_layout.pageRect(pageIndex).isNull())
+        return;
     const QTransform pageToView = pageToViewTransform(pageIndex);
     const QRectF bounds = pageBounds.normalized();
     if (bounds.isEmpty()) {
@@ -538,6 +648,7 @@ void PdfView::revealPageRegion(int pageIndex, const QRectF &pageBounds)
         m_currentPage = pageIndex;
         emit pageChanged(m_currentPage);
     }
+    emit navigated(pageIndex, bounds.center(), static_cast<int>(NavigationReason::Annotation));
     viewport()->update();
 }
 
@@ -671,7 +782,10 @@ void PdfView::resizeEvent(QResizeEvent *event)
     updateScrollBars();
     if (m_fitPending)
         fitPage();
+    else if (m_zoomMode == ZoomMode::FitWidth || m_zoomMode == ZoomMode::FitPage)
+        applyFitZoom();
     updateCurrentPage();
+    emit readingAnchorChanged();
     viewport()->update();
 }
 
@@ -701,7 +815,34 @@ void PdfView::paintEvent(QPaintEvent *event)
         paintPage(painter, page, pageRectInView, pageToView);
     }
 
+    for (auto it = m_searchHighlights.constBegin(); it != m_searchHighlights.constEnd(); ++it) {
+        const int page = it.key();
+        if (page < 0 || page >= m_pageSizes.size() || !isPageVisible(page))
+            continue;
+        const QTransform pageToView = pageToViewTransform(page);
+        painter.save();
+        painter.setClipRect(pageRectInView(page));
+        painter.setTransform(pageToView);
+        for (const QRectF &rect : it.value()) {
+            const bool current = page == m_searchCurrentPage && rect == m_searchCurrentRect;
+            painter.fillRect(rect, QColor(255, 206, 84, current ? 190 : 110));
+            painter.setPen(QPen(QColor(230, 150, 0), current ? 1.5 : 0.8));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRect(rect);
+        }
+        painter.restore();
+    }
+
     paintSelectionOverlay(painter);
+
+    if (m_tool == Tool::Eraser && m_lastMouseViewPos.x() >= 0) {
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(QPen(QColor(QStringLiteral("#2f6fed")), 1.25));
+        painter.setBrush(QColor(47, 111, 237, 36));
+        painter.drawEllipse(QPointF(m_lastMouseViewPos), m_eraserRadius, m_eraserRadius);
+        painter.restore();
+    }
 
     for (const Annotation &annotation : m_annotations.annotations()) {
         if (annotation.pageIndex < 0 || annotation.pageIndex >= m_pageSizes.size())
@@ -958,14 +1099,38 @@ void PdfView::updateCurrentPage()
 {
     if (!hasDocument() || m_pageSizes.isEmpty())
         return;
-    const QPointF center(horizontalScrollBar()->value() + viewport()->width() / 2.0,
-                         verticalScrollBar()->value() + viewport()->height() / 2.0);
-    int page = m_layout.pageAtPoint(center);
-    if (page < 0)
-        page = m_layout.pageAtY(center.y());
-    if (page >= 0 && page != m_currentPage) {
-        m_currentPage = page;
-        emit pageChanged(page);
+    const QRectF viewportRect(horizontalScrollBar()->value(), verticalScrollBar()->value(),
+                              viewport()->width(), viewport()->height());
+    int bestPage = -1;
+    qreal bestArea = 0.0;
+    qreal currentArea = 0.0;
+    for (int page = 0; page < m_pageSizes.size(); ++page) {
+        const QRectF rect = m_layout.pageRect(page);
+        if (rect.isNull())
+            continue;
+        const QRectF visible = rect.intersected(viewportRect);
+        const qreal area = visible.width() * visible.height();
+        if (area <= 0.0)
+            continue;
+        if (page == m_currentPage)
+            currentArea = area;
+        if (area > bestArea) {
+            bestArea = area;
+            bestPage = page;
+        }
+    }
+    if (bestPage < 0) {
+        // Tracks mouse position for the eraser cursor even when the pointer is
+        // outside a page.
+        return;
+    }
+    if (bestPage != m_currentPage) {
+        const bool currentVisible = currentArea > 0.0;
+        if (!currentVisible || bestArea > currentArea * 1.15) {
+            m_currentPage = bestPage;
+            m_layout.setCurrentPage(bestPage);
+            emit pageChanged(bestPage);
+        }
     }
 }
 
@@ -1002,10 +1167,44 @@ void PdfView::centerPage(int pageIndex)
 {
     if (pageIndex < 0 || pageIndex >= m_pageSizes.size())
         return;
-    const QRectF rect = m_layout.pageRect(pageIndex);
+    m_layout.setCurrentPage(pageIndex);
+    const QRectF rect = m_layout.spreadRect(pageIndex);
+    if (rect.isNull())
+        return;
     horizontalScrollBar()->setValue(qRound(rect.center().x() - viewport()->width() / 2.0));
     verticalScrollBar()->setValue(qRound(rect.center().y() - viewport()->height() / 2.0));
     updateCurrentPage();
+}
+
+QRectF PdfView::currentSpreadRect() const
+{
+    if (!hasDocument() || m_currentPage < 0 || m_currentPage >= m_pageSizes.size())
+        return QRectF();
+    return m_layout.spreadRect(m_currentPage);
+}
+
+void PdfView::applyFitZoom()
+{
+    if (!hasDocument() || m_pageSizes.isEmpty())
+        return;
+    m_layout.setCurrentPage(m_currentPage);
+    QRectF rect = m_layout.spreadRect(m_currentPage);
+    if (rect.isNull())
+        rect = m_layout.pageRect(m_currentPage);
+    if (rect.isNull() || rect.width() <= 0.0 || rect.height() <= 0.0)
+        return;
+
+    const qreal availableW = qMax<qreal>(40.0, viewport()->width() - 2.0 * m_layout.margin() - 8.0);
+    const qreal availableH = qMax<qreal>(40.0, viewport()->height() - 2.0 * m_layout.margin() - 8.0);
+    const qreal zoomW = m_layout.zoom() * availableW / rect.width();
+    const qreal zoomH = m_layout.zoom() * availableH / rect.height();
+    qreal target = m_zoomMode == ZoomMode::FitWidth ? zoomW : qMin(zoomW, zoomH);
+    target = qBound<qreal>(0.05, target, 12.0);
+    if (qFuzzyCompare(target, m_layout.zoom()))
+        return;
+    rebuildLayoutAndKeepAnchor(target, m_layout.rotation(),
+                               QPointF(viewport()->width() / 2.0, viewport()->height() / 2.0));
+    emit zoomChanged(m_layout.zoom());
 }
 
 QTransform PdfView::pageToViewTransform(int pageIndex) const
@@ -1108,6 +1307,10 @@ void PdfView::wheelEvent(QWheelEvent *event)
             const qreal factor = std::pow(1.0016, delta);
             const qreal target = qBound(0.05, m_layout.zoom() * factor, 12.0);
             if (!qFuzzyCompare(target, m_layout.zoom())) {
+                if (m_zoomMode != ZoomMode::Fixed) {
+                    m_zoomMode = ZoomMode::Fixed;
+                    emit zoomModeChanged(m_zoomMode);
+                }
                 rebuildLayoutAndKeepAnchor(target, m_layout.rotation(), event->position());
                 emit zoomChanged(m_layout.zoom());
             }
@@ -1120,6 +1323,23 @@ void PdfView::wheelEvent(QWheelEvent *event)
                                        - event->angleDelta().y());
         event->accept();
         return;
+    }
+    if (m_wheelTurnsPage && event->angleDelta().y() != 0) {
+        QScrollBar *bar = verticalScrollBar();
+        const bool atTop = bar->value() <= bar->minimum();
+        const bool atBottom = bar->value() >= bar->maximum();
+        if (event->angleDelta().y() < 0 && atBottom && m_currentPage + 1 < pageCount()) {
+            navigateTo(m_currentPage + 1, QPointF(), NavigationAlignment::PageTop,
+                       NavigationReason::PageInput);
+            event->accept();
+            return;
+        }
+        if (event->angleDelta().y() > 0 && atTop && m_currentPage > 0) {
+            navigateTo(m_currentPage - 1, QPointF(), NavigationAlignment::PageTop,
+                       NavigationReason::PageInput);
+            event->accept();
+            return;
+        }
     }
     QAbstractScrollArea::wheelEvent(event);
 }
@@ -1141,22 +1361,28 @@ void PdfView::keyPressEvent(QKeyEvent *event)
         }
     }
     if (event->key() == Qt::Key_Escape) {
-        m_dragMode = DragMode::None;
-        m_draft = Annotation();
-        m_editId.clear();
-        m_resizeHandle = -1;
-        m_dragPage = -1;
-        m_textSelecting = false;
-        m_textSelection.reset();
-        m_textSelectionPage = -1;
-        selectAnnotation(QString());
-        viewport()->update();
-        event->accept();
-        return;
+        if (handleEscape()) {
+            event->accept();
+            return;
+        }
     }
     if (event->matches(QKeySequence::Copy)) {
-        if (!selectedText().isEmpty()) {
-            copySelectedText();
+        if (copySelectionOrAnnotation()) {
+            event->accept();
+            return;
+        }
+    }
+    if (event->matches(QKeySequence::Paste)) {
+        if (pasteAnnotation()) {
+            event->accept();
+            return;
+        }
+    }
+    if (event->matches(QKeySequence::New) && (event->modifiers() & Qt::ControlModifier)) {
+        // Ctrl+D is handled here rather than using QKeySequence::New semantics.
+    }
+    if (event->key() == Qt::Key_D && (event->modifiers() & Qt::ControlModifier)) {
+        if (duplicateSelected()) {
             event->accept();
             return;
         }
@@ -1222,7 +1448,14 @@ void PdfView::mousePressEvent(QMouseEvent *event)
     }
 
     if (m_tool == Tool::Eraser) {
-        eraseAt(viewPos);
+        m_dragMode = DragMode::Erase;
+        m_dragStartView = viewPos;
+        m_lastMouseViewPos = viewPos.toPoint();
+        m_eraseLastView = viewPos;
+        m_eraseIds.clear();
+        m_eraseRemoved.clear();
+        eraseSegment(viewPos, viewPos);
+        viewport()->update();
         return;
     }
 
@@ -1298,6 +1531,7 @@ void PdfView::mouseMoveEvent(QMouseEvent *event)
         return;
     }
     const QPointF viewPos = event->position();
+    m_lastMouseViewPos = viewPos.toPoint();
     if (m_tool == Tool::Hand) {
         if (event->buttons() & Qt::LeftButton) {
             const QPointF delta = viewPos - m_handLastView;
@@ -1311,6 +1545,10 @@ void PdfView::mouseMoveEvent(QMouseEvent *event)
     }
 
     switch (m_dragMode) {
+    case DragMode::Erase:
+        eraseSegment(m_eraseLastView.isNull() ? viewPos : m_eraseLastView, viewPos);
+        m_eraseLastView = viewPos;
+        break;
     case DragMode::TextSelection:
         updateTextSelection(viewPos);
         break;
@@ -1358,6 +1596,11 @@ void PdfView::mouseMoveEvent(QMouseEvent *event)
                 }
             }
         }
+        if (shape == Qt::ArrowCursor && hit.isEmpty()) {
+            const int page = pageAtViewPos(viewPos);
+            if (page >= 0 && textAtPagePoint(viewToPage(viewPos, page), page))
+                shape = Qt::IBeamCursor;
+        }
         viewport()->setCursor(shape);
     }
     QAbstractScrollArea::mouseMoveEvent(event);
@@ -1376,6 +1619,12 @@ void PdfView::mouseReleaseEvent(QMouseEvent *event)
     }
 
     switch (m_dragMode) {
+    case DragMode::Erase: {
+        const QPointF releasePos = event->position();
+        eraseSegment(m_eraseLastView.isNull() ? releasePos : m_eraseLastView, releasePos);
+        commitErase();
+        break;
+    }
     case DragMode::TextSelection:
         updateTextSelection(event->position());
         finishTextSelection();
@@ -1791,6 +2040,141 @@ void PdfView::clearTemporarySelections()
         emit regionSelectionChanged();
 }
 
+bool PdfView::handleEscape()
+{
+    const bool hadInteraction = m_dragMode != DragMode::None || hasTextSelection()
+        || hasRegionSelection() || !m_selectedId.isEmpty() || m_tool != Tool::Select;
+    if (!hadInteraction)
+        return false;
+
+    m_dragMode = DragMode::None;
+    m_draft = Annotation();
+    m_editId.clear();
+    m_resizeHandle = -1;
+    m_dragPage = -1;
+    m_textSelecting = false;
+    m_eraseIds.clear();
+    m_eraseRemoved.clear();
+    clearTemporarySelections();
+    selectAnnotation(QString());
+    if (m_tool != Tool::Select)
+        setTool(Tool::Select);
+    viewport()->update();
+    return true;
+}
+
+QString PdfView::annotationClipboardJson() const
+{
+    const Annotation *annotation = m_annotations.find(m_selectedId);
+    if (!annotation || annotation->isTextType() || annotation->type == AnnotationType::NotePoint)
+        return QString();
+    QJsonObject payload;
+    payload.insert(QStringLiteral("schema_version"), 1);
+    payload.insert(QStringLiteral("annotation"), annotation->toJson());
+    return QString::fromUtf8(QJsonDocument(payload).toJson(QJsonDocument::Compact));
+}
+
+bool PdfView::copySelectionOrAnnotation()
+{
+    if (hasTextSelection() && !selectedText().isEmpty()) {
+        copySelectedText();
+        return true;
+    }
+    const QString json = annotationClipboardJson();
+    if (json.isEmpty()) {
+        emit statusMessage(tr("当前没有可复制的文本或图形标注"));
+        return false;
+    }
+    auto *mime = new QMimeData;
+    mime->setData(QStringLiteral("application/x-pano-annotation+json"), json.toUtf8());
+    QApplication::clipboard()->setMimeData(mime);
+    emit statusMessage(tr("已复制标注"));
+    return true;
+}
+
+bool PdfView::pasteAnnotation(const QPointF &viewPos)
+{
+    const QMimeData *mime = QApplication::clipboard()->mimeData();
+    if (!mime || !mime->hasFormat(QStringLiteral("application/x-pano-annotation+json"))) {
+        emit statusMessage(tr("剪贴板中没有可粘贴的标注"));
+        return false;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(
+        mime->data(QStringLiteral("application/x-pano-annotation+json")), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+        emit statusMessage(tr("剪贴板中的标注数据无效"));
+        return false;
+    }
+    const QJsonObject payload = doc.object();
+    const QJsonObject object = payload.value(QStringLiteral("annotation")).toObject();
+    Annotation annotation;
+    QString error;
+    if (!Annotation::fromJson(object, &annotation, &error)) {
+        emit statusMessage(tr("无法粘贴标注：%1").arg(error));
+        return false;
+    }
+    if (annotation.isTextType() || annotation.type == AnnotationType::NotePoint) {
+        emit statusMessage(tr("该标注类型不支持粘贴"));
+        return false;
+    }
+
+    int page = pageAtViewPos(viewPos);
+    QPointF point;
+    if (page >= 0) {
+        point = clampToPage(viewToPage(viewPos, page), page);
+    } else {
+        page = qBound(0, m_currentPage, pageCount() - 1);
+        if (page < 0)
+            return false;
+        const QSizeF size = m_pageSizes.value(page);
+        point = QPointF(size.width() / 2.0, size.height() / 2.0);
+    }
+
+    const QRectF bounds = annotation.bounds();
+    annotation.pageIndex = page;
+    annotation.translate(point - bounds.center());
+    annotation.id = newAnnotationId();
+    annotation.createdAt = nowIsoUtc();
+    annotation.modifiedAt = annotation.createdAt;
+    annotation.note = AnnotationNote();
+    m_undoStack.push(new AddAnnotationCommand(&m_annotations, annotation));
+    selectAnnotation(annotation.id);
+    emit statusMessage(tr("已粘贴%1").arg(annotationTypeDisplayName(annotation.type)));
+    return true;
+}
+
+bool PdfView::duplicateSelected()
+{
+    const Annotation *annotation = m_annotations.find(m_selectedId);
+    if (!annotation || annotation->isTextType() || annotation->type == AnnotationType::NotePoint) {
+        emit statusMessage(tr("当前没有可复制的图形标注"));
+        return false;
+    }
+    Annotation copy = *annotation;
+    copy.id = newAnnotationId();
+    copy.createdAt = nowIsoUtc();
+    copy.modifiedAt = copy.createdAt;
+    copy.note = AnnotationNote();
+    const QSizeF size = m_pageSizes.value(copy.pageIndex);
+    const qreal offset = 12.0;
+    const QRectF bounds = copy.bounds();
+    const qreal dx = qMin(offset, qMax<qreal>(0.0, size.width() - bounds.right()));
+    const qreal dy = qMin(offset, qMax<qreal>(0.0, size.height() - bounds.bottom()));
+    copy.translate(QPointF(dx, dy));
+    m_undoStack.push(new AddAnnotationCommand(&m_annotations, copy));
+    selectAnnotation(copy.id);
+    emit statusMessage(tr("已复制标注"));
+    return true;
+}
+
+void PdfView::setEraserRadius(int radius)
+{
+    m_eraserRadius = qBound(4, radius, 25);
+    emit statusMessage(tr("橡皮半径：%1 px").arg(m_eraserRadius));
+    viewport()->update();
+}
+
 void PdfView::beginRegionSelection(const QPointF &viewPos)
 {
     const int pageIndex = pageAtViewPos(viewPos);
@@ -1834,17 +2218,26 @@ void PdfView::finishRegionSelection()
     emit regionSelectionChanged();
 }
 
-bool PdfView::textAtPagePoint(const QPointF &pagePoint, int pageIndex) const
+bool PdfView::textAtPagePoint(const QPointF &pagePoint, int pageIndex)
 {
     if (!hasDocument() || pageIndex < 0)
         return false;
-    const QPointF delta(0.8, 0.0);
-    QPdfSelection selection = m_document.pdf()->getSelection(pageIndex, pagePoint - delta,
-                                                             pagePoint + delta);
+    if (m_textHitValid && m_textHitPage == pageIndex
+        && QLineF(m_textHitPoint, pagePoint).length() <= 0.75)
+        return m_textHitResult;
+
+    const qreal tolerance = 5.0 / qMax<qreal>(0.05, m_layout.zoom());
+    QPdfSelection selection = m_document.pdf()->getSelection(
+        pageIndex, pagePoint - QPointF(tolerance, tolerance),
+        pagePoint + QPointF(tolerance, tolerance));
     if (!selection.isValid())
         selection = m_document.pdf()->getSelection(pageIndex, pagePoint,
-                                                   pagePoint + QPointF(1.0, 0.0));
-    return selection.isValid() && !selection.text().trimmed().isEmpty();
+                                                   pagePoint + QPointF(tolerance, 0.0));
+    m_textHitValid = true;
+    m_textHitPage = pageIndex;
+    m_textHitPoint = pagePoint;
+    m_textHitResult = selection.isValid() && !selection.text().trimmed().isEmpty();
+    return m_textHitResult;
 }
 
 void PdfView::beginDraw(int pageIndex, const QPointF &pagePoint)
@@ -1876,6 +2269,8 @@ void PdfView::beginDraw(int pageIndex, const QPointF &pagePoint)
     m_dragMoved = false;
     m_draft = makeBaseAnnotation(type, pageIndex);
     m_draft.path.clear();
+    m_drawRawPath.clear();
+    m_drawRawPath.append(m_dragStartPage);
     m_draft.polygons.clear();
     m_draft.style = m_defaultStyle;
     m_dragMode = (type == AnnotationType::Pencil || type == AnnotationType::Highlighter)
@@ -1898,18 +2293,40 @@ void PdfView::updateDraw(int pageIndex, const QPointF &pagePoint)
         m_draft.rect = QRectF(m_draft.p1, m_draft.p2).normalized();
         break;
     case AnnotationType::Rectangle:
-    case AnnotationType::Ellipse:
-        m_draft.rect = QRectF(m_dragStartPage, point).normalized();
+    case AnnotationType::Ellipse: {
+        QPointF end = point;
+        if (shiftHeld()) {
+            const QSizeF pageSize = m_pageSizes.value(pageIndex);
+            qreal dx = point.x() - m_dragStartPage.x();
+            qreal dy = point.y() - m_dragStartPage.y();
+            const qreal side = qMax(std::abs(dx), std::abs(dy));
+            const qreal sx = dx < 0.0 ? -1.0 : 1.0;
+            const qreal sy = dy < 0.0 ? -1.0 : 1.0;
+            const qreal maxX = sx > 0.0 ? pageSize.width() - m_dragStartPage.x()
+                                        : m_dragStartPage.x();
+            const qreal maxY = sy > 0.0 ? pageSize.height() - m_dragStartPage.y()
+                                        : m_dragStartPage.y();
+            const qreal clamped = qMin(side, qMin(maxX, maxY));
+            end = m_dragStartPage + QPointF(sx * clamped, sy * clamped);
+        }
+        m_draft.rect = QRectF(m_dragStartPage, end).normalized();
         break;
+    }
     case AnnotationType::Pencil:
     case AnnotationType::Highlighter: {
-        if (m_draft.path.isEmpty())
-            m_draft.path.append(m_dragStartPage);
-        if (shiftHeld()) {
-            m_draft.path = QVector<QPointF>{m_dragStartPage, snapToAxis(m_dragStartPage, point)};
-        } else if (m_draft.path.last() != point) {
-            if (QLineF(m_draft.path.last(), point).length() >= 0.4)
-                m_draft.path.append(point);
+        // Keep every raw freehand point even while Shift is held. Shift only
+        // changes the preview to a snapped segment; releasing it returns to the
+        // full freehand path instead of discarding collected input.
+        if (m_drawRawPath.isEmpty())
+            m_drawRawPath.append(m_dragStartPage);
+        if (m_drawRawPath.last() != point
+            && QLineF(m_drawRawPath.last(), point).length() >= 0.4)
+            m_drawRawPath.append(point);
+        m_draft.path = m_drawRawPath;
+        if (shiftHeld() && m_drawRawPath.size() >= 1) {
+            const QPointF snapped = snapToAxis(m_drawRawPath.first(), point);
+            if (QLineF(m_drawRawPath.last(), snapped).length() >= 0.4)
+                m_draft.path.append(snapped);
         }
         const QRectF bounds = pathBounds(m_draft.path);
         const qreal pad = m_draft.style.strokeWidthPt / 2.0;
@@ -1928,6 +2345,15 @@ void PdfView::finishDraw()
         return;
     bool valid = false;
     if (m_draft.type == AnnotationType::Pencil || m_draft.type == AnnotationType::Highlighter) {
+        if (!m_drawRawPath.isEmpty()) {
+            if (m_drawRawPath.last() != m_dragCurrentPage
+                && QLineF(m_drawRawPath.last(), m_dragCurrentPage).length() >= 0.4)
+                m_drawRawPath.append(m_dragCurrentPage);
+            m_draft.path = m_drawRawPath;
+            const QRectF bounds = pathBounds(m_draft.path);
+            const qreal pad = m_draft.style.strokeWidthPt / 2.0;
+            m_draft.rect = bounds.adjusted(-pad, -pad, pad, pad);
+        }
         valid = m_draft.path.size() >= 2
                 || (m_draft.path.size() == 1
                     && QLineF(m_dragStartPage, m_dragCurrentPage).length() > 0.5);
@@ -2093,16 +2519,153 @@ void PdfView::addAnnotation(const Annotation &annotation, bool selectAfter)
     emit statusMessage(tr("已添加%1").arg(annotationTypeDisplayName(copy.type)));
 }
 
+void PdfView::setSearchHighlights(const QHash<int, QVector<QRectF>> &highlights,
+                                  int currentPage, const QRectF &currentRect)
+{
+    m_searchHighlights = highlights;
+    m_searchCurrentPage = currentPage;
+    m_searchCurrentRect = currentRect;
+    viewport()->update();
+}
+
+void PdfView::clearSearchHighlights()
+{
+    if (m_searchHighlights.isEmpty() && m_searchCurrentPage < 0)
+        return;
+    m_searchHighlights.clear();
+    m_searchCurrentPage = -1;
+    m_searchCurrentRect = QRectF();
+    viewport()->update();
+}
+
+QImage PdfView::selectedRegionImage() const
+{
+    if (!hasRegionSelection() || m_regionSelectionPage < 0)
+        return QImage();
+    return regionImage();
+}
+
+void PdfView::contextMenuEvent(QContextMenuEvent *event)
+{
+    if (!hasDocument()) {
+        QAbstractScrollArea::contextMenuEvent(event);
+        return;
+    }
+    const QPointF viewPos = event->pos();
+    const int page = pageAtViewPos(viewPos);
+    const QPointF pagePoint = page >= 0 ? viewToPage(viewPos, page) : QPointF();
+    const QString hit = annotationAt(viewPos);
+    QMenu menu(this);
+
+    if (hasRegionSelection() && regionViewRect().contains(viewPos)) {
+        QAction *copyImage = menu.addAction(tr("复制区域图片"));
+        QAction *saveImage = menu.addAction(tr("保存区域图片…"));
+        menu.addSeparator();
+        QAction *note = menu.addAction(tr("为区域添加笔记"));
+        QAction *chosen = menu.exec(event->globalPos());
+        if (!chosen)
+            return;
+        if (chosen == copyImage) {
+            const QImage image = regionImage();
+            if (!image.isNull())
+                QApplication::clipboard()->setImage(image);
+        } else if (chosen == saveImage) {
+            const QString path = QFileDialog::getSaveFileName(this, tr("保存区域图片"),
+                                                              QStringLiteral("region.png"),
+                                                              tr("PNG 图片 (*.png)"));
+            if (!path.isEmpty()) {
+                const QImage image = regionImage();
+                if (!image.isNull())
+                    image.save(path, "PNG");
+            }
+        } else if (chosen == note) {
+            emit noteRequested(QString());
+        }
+        return;
+    }
+
+    if (!hit.isEmpty()) {
+        selectAnnotation(hit);
+        const Annotation *annotation = m_annotations.find(hit);
+        if (annotation) {
+            menu.addAction(tr("复制"), this, &PdfView::copySelectionOrAnnotation);
+            menu.addAction(tr("创建副本"), this, &PdfView::duplicateSelected);
+            menu.addAction(tr("编辑笔记…"), this, [this, id = hit]() { emit noteRequested(id); });
+            menu.addSeparator();
+            menu.addAction(tr("删除"), this, [this, id = hit]() { deleteAnnotation(id); });
+        }
+    } else if (!selectedText().isEmpty()) {
+        menu.addAction(tr("复制文本"), this, &PdfView::copySelectedText);
+        menu.addAction(tr("高亮选中文本"), this, [this]() {
+            if (m_textSelection)
+                createTextAnnotation(*m_textSelection, m_textSelectionPage);
+        });
+    } else {
+        menu.addAction(tr("粘贴标注"), this, [this, viewPos]() { pasteAnnotation(viewPos); });
+        menu.addAction(tr("全选当前页文本"), this, [this, page]() {
+            if (page < 0)
+                return;
+            const QSizeF size = m_pageSizes.value(page);
+            QPdfSelection selection = m_document.pdf()->getSelection(
+                page, QPointF(0, 0), QPointF(size.width(), size.height()));
+            if (selection.isValid()) {
+                m_textSelection = selection;
+                m_textSelectionPage = page;
+                emit textSelectionChanged();
+                viewport()->update();
+            }
+        });
+        if (page >= 0)
+            menu.addAction(tr("在此处添加书签"), this,
+                           [this, page, pagePoint]() { emit bookmarkRequested(page, pagePoint); });
+    }
+
+    if (!menu.isEmpty())
+        menu.exec(event->globalPos());
+}
 void PdfView::eraseAt(const QPointF &viewPos)
 {
-    const QString hit = annotationAt(viewPos);
-    if (hit.isEmpty()) {
+    m_eraseIds.clear();
+    m_eraseRemoved.clear();
+    eraseSegment(viewPos, viewPos);
+    commitErase();
+}
+
+void PdfView::eraseSegment(const QPointF &from, const QPointF &to)
+{
+    const qreal distance = QLineF(from, to).length();
+    const int steps = qMax(1, static_cast<int>(std::ceil(distance / qMax(3, m_eraserRadius / 2))));
+    for (int step = 0; step <= steps; ++step) {
+        const qreal t = steps == 0 ? 1.0 : static_cast<qreal>(step) / steps;
+        const QPointF point = from + (to - from) * t;
+        const QString hit = annotationAt(point);
+        if (hit.isEmpty() || m_eraseIds.contains(hit))
+            continue;
+        const Annotation *annotation = m_annotations.find(hit);
+        if (!annotation)
+            continue;
+        if (!annotation->note.isEmpty()) {
+            emit statusMessage(tr("该标注带有笔记，已跳过；请用选择工具删除并确认"));
+            continue;
+        }
+        m_eraseIds.insert(hit);
+        m_eraseRemoved.append(*annotation);
+    }
+}
+
+void PdfView::commitErase()
+{
+    if (m_eraseRemoved.isEmpty()) {
         emit statusMessage(tr("此处没有可删除的批注"));
         return;
     }
-    // Object eraser: delete the whole annotation. Annotations carrying notes
-    // are protected by noteDeleteRequested() and require explicit confirmation.
-    deleteAnnotation(hit);
+    m_undoStack.push(new RemoveAnnotationsCommand(&m_annotations, m_eraseRemoved));
+    selectAnnotation(QString());
+    emit statusMessage(tr("已擦除 %1 个标注").arg(m_eraseRemoved.size()));
+    m_eraseRemoved.clear();
+    m_eraseIds.clear();
+    m_dragMode = DragMode::None;
+    viewport()->update();
 }
 
 void PdfView::dragEnterEvent(QDragEnterEvent *event)

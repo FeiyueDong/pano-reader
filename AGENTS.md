@@ -46,3 +46,11 @@ xmake -j4
 - 修复问题优先定位根因，不用统一偏移、全局缩放或数据重写掩盖坐标错误。
 - 不提交 `build/`、临时书库、截图缓存或个人路径。
 - 文档使用中文；代码标识符和 JSON 字段使用英文。
+
+
+## Phase 2 探针
+
+- `pano-phase2-probe` 覆盖四种页面布局、缩放模式、复制粘贴、书签、搜索、全屏和
+  连续橡皮；涉及 `bookmarks.json`、`reading.json` 布局字段时必须运行。
+- `pano-pdf-timing` 用于大 PDF 打开/首屏测量，例如
+  `./build/linux/x86_64/debug/pano-pdf-timing "/path/to/book.pdf"`。

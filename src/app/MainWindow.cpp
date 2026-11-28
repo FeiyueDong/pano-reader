@@ -3,6 +3,8 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
+#include <QEvent>
+#include <QKeyEvent>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDesktopServices>
@@ -239,6 +241,10 @@ void MainWindow::buildActions()
     connect(m_aboutAction, &QAction::triggered, this, &MainWindow::showAbout);
     m_diagnosticsAction = new QAction(tr("诊断信息"), this);
     connect(m_diagnosticsAction, &QAction::triggered, this, &MainWindow::showDiagnostics);
+    m_fullscreenAction = new QAction(tr("全屏"), this);
+    m_fullscreenAction->setShortcut(QKeySequence(Qt::Key_F11));
+    m_fullscreenAction->setCheckable(true);
+    connect(m_fullscreenAction, &QAction::triggered, this, &MainWindow::toggleFullscreen);
 
     m_toolGroup = new QActionGroup(this);
     m_toolGroup->setExclusive(true);
@@ -302,6 +308,8 @@ void MainWindow::buildMenus()
     viewMenu->addAction(m_fitPageAction);
     viewMenu->addSeparator();
     viewMenu->addAction(m_rotateAction);
+    viewMenu->addSeparator();
+    viewMenu->addAction(m_fullscreenAction);
 
     QMenu *annotationMenu = menuBar()->addMenu(tr("标注"));
     for (QAction *action : m_toolActions)
@@ -343,13 +351,8 @@ void MainWindow::buildToolBar()
     m_zoomCombo = new QComboBox(this);
     m_zoomCombo->setEditable(true);
     m_zoomCombo->setMinimumWidth(100);
-    m_zoomCombo->addItem(QStringLiteral("50%"), 50);
-    m_zoomCombo->addItem(QStringLiteral("75%"), 75);
-    m_zoomCombo->addItem(QStringLiteral("100%"), 100);
-    m_zoomCombo->addItem(QStringLiteral("125%"), 125);
-    m_zoomCombo->addItem(QStringLiteral("150%"), 150);
-    m_zoomCombo->addItem(QStringLiteral("200%"), 200);
-    m_zoomCombo->addItem(QStringLiteral("300%"), 300);
+    for (int percent : {25, 50, 75, 100, 125, 150, 200, 300, 400})
+        m_zoomCombo->addItem(QStringLiteral("%1%").arg(percent), percent);
     connect(m_zoomCombo->lineEdit(), &QLineEdit::editingFinished, this, &MainWindow::zoomEdited);
     connect(m_zoomCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
         if (!currentSession())
@@ -1029,6 +1032,58 @@ void MainWindow::restoreLastSession()
     }
     if (!settings.lastBookId.isEmpty() && m_manager->hasBook(settings.lastBookId))
         openBook(settings.lastBookId);
+}
+
+void MainWindow::toggleFullscreen()
+{
+    if (!m_fullscreen) {
+        m_savedWindowState = saveState();
+        m_savedGeometry = saveGeometry();
+        m_savedMenuVisible = menuBar()->isVisible();
+        m_savedStatusVisible = statusBar()->isVisible();
+        m_savedTabBarVisible = m_tabs->tabBar()->isVisible();
+        m_fullscreen = true;
+        if (m_fullscreenAction)
+            m_fullscreenAction->setChecked(true);
+        menuBar()->hide();
+        statusBar()->hide();
+        m_tabs->tabBar()->hide();
+        if (ReaderWorkspace *workspace = currentWorkspace())
+            workspace->setFullscreenMode(true);
+        showFullScreen();
+        qApp->installEventFilter(this);
+    } else {
+        m_fullscreen = false;
+        if (m_fullscreenAction)
+            m_fullscreenAction->setChecked(false);
+        qApp->removeEventFilter(this);
+        showNormal();
+        if (!m_savedGeometry.isEmpty())
+            restoreGeometry(m_savedGeometry);
+        if (!m_savedWindowState.isEmpty())
+            restoreState(m_savedWindowState);
+        menuBar()->setVisible(m_savedMenuVisible);
+        statusBar()->setVisible(m_savedStatusVisible);
+        m_tabs->tabBar()->setVisible(m_savedTabBarVisible);
+        if (ReaderWorkspace *workspace = currentWorkspace())
+            workspace->setFullscreenMode(false);
+    }
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (m_fullscreen && event->type() == QEvent::KeyPress) {
+        auto *keyEvent = static_cast<QKeyEvent *>(event);
+        if (keyEvent->key() == Qt::Key_Escape) {
+            if (ReaderWorkspace *workspace = currentWorkspace()) {
+                if (workspace->closeTransientUi())
+                    return true;
+            }
+            toggleFullscreen();
+            return true;
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)

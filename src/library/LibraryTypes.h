@@ -47,6 +47,8 @@ struct ReadingState {
     qreal zoom = 1.0;
     ZoomMode zoomMode = ZoomMode::FitPage;
     int rotation = 0;
+    QString layoutMode = QStringLiteral("continuous");
+    bool firstPageAlone = true;
     QString updatedAt;
     bool valid = false;
 };

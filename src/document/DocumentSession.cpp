@@ -13,6 +13,7 @@
 #include "app/ReaderWorkspace.h"
 #include "library/LibraryManager.h"
 #include "settings/SettingsManager.h"
+#include "reader/PageLayout.h"
 #include "reader/PdfView.h"
 #include "storage/JsonUtils.h"
 #include "storage/LibraryStore.h"
@@ -50,6 +51,16 @@ DocumentSession::DocumentSession(LibraryManager *manager, const BookInfo &book,
     connect(view(), &PdfView::pageChanged, this, &DocumentSession::onPageChanged);
     connect(view(), &PdfView::zoomChanged, this, &DocumentSession::onZoomChanged);
     connect(view(), &PdfView::rotationChanged, this, &DocumentSession::onRotationChanged);
+    connect(view(), &PdfView::zoomModeChanged, this, [this](ZoomMode mode) {
+        m_zoomMode = mode;
+        scheduleReadingSave();
+    });
+    connect(view(), &PdfView::layoutModeChanged, this, [this](PageLayoutMode) {
+        scheduleReadingSave();
+    });
+    connect(view(), &PdfView::firstPageAloneChanged, this, [this](bool) {
+        scheduleReadingSave();
+    });
     connect(view(), &PdfView::readingAnchorChanged, this, &DocumentSession::scheduleReadingSave);
 }
 
@@ -121,6 +132,14 @@ bool DocumentSession::load(QString *errorMessage)
     }
 
     m_annotationsFingerprint = annotationsFingerprint();
+    QString bookmarkError;
+    if (!m_bookmarkStore.load(bookDirectory(), m_book.id, &bookmarkError)) {
+        emit statusMessage(bookmarkError);
+    }
+    connect(&m_bookmarkStore, &BookmarkStore::dirtyChanged, this, [this](bool dirty) {
+        if (dirty)
+            markDirty();
+    });
 
     QVector<Annotation> parsed;
     parsed.reserve(annotations.size());
@@ -155,9 +174,16 @@ bool DocumentSession::load(QString *errorMessage)
     }
     view()->annotations()->setAnnotations(parsed);
     view()->undoStack()->clear();
+    if (m_settings)
+        view()->setWheelTurnsPage(m_settings->settings().wheelTurnsPage);
 
     const ReadingState state = m_manager->readingState(m_book.id);
     if (state.valid) {
+        PageLayoutMode layoutMode = PageLayoutMode::ContinuousSingle;
+        if (pageLayoutModeFromString(state.layoutMode, &layoutMode)) {
+            view()->setLayoutMode(layoutMode);
+            view()->setFirstPageAlone(state.firstPageAlone);
+        }
         if (state.rotation == 90 || state.rotation == 180 || state.rotation == 270)
             view()->setRotation(state.rotation);
         m_zoomMode = state.zoomMode;
@@ -167,7 +193,24 @@ bool DocumentSession::load(QString *errorMessage)
             view()->fitPage();
         else
             view()->setZoom(state.zoom);
-        view()->goToPage(state.pageIndex);
+        if (!state.pagePoint.isNull())
+            view()->navigateTo(state.pageIndex, state.pagePoint,
+                               PdfView::NavigationAlignment::Center,
+                               PdfView::NavigationReason::Restore);
+        else
+            view()->navigateTo(state.pageIndex, QPointF(),
+                               PdfView::NavigationAlignment::PageTop,
+                               PdfView::NavigationReason::Restore);
+    } else if (m_settings) {
+        PageLayoutMode layoutMode = PageLayoutMode::ContinuousSingle;
+        pageLayoutModeFromString(m_settings->settings().defaultLayoutMode, &layoutMode);
+        view()->setLayoutMode(layoutMode);
+        view()->setFirstPageAlone(m_settings->settings().firstPageAlone);
+        view()->setPageGap(m_settings->settings().pageGap);
+        if (m_settings->settings().defaultZoomMode == ZoomMode::FitWidth)
+            view()->fitWidth();
+        else if (m_settings->settings().defaultZoomMode == ZoomMode::FitPage)
+            view()->fitPage();
     }
 
     m_loaded = true;
@@ -189,6 +232,15 @@ bool DocumentSession::saveNow(QString *errorMessage)
     }
     if (!m_dirty) {
         saveReadingState();
+        if (m_bookmarkStore.isDirty()) {
+            QString bookmarkError;
+            if (!m_bookmarkStore.save(&bookmarkError)) {
+                if (errorMessage)
+                    *errorMessage = bookmarkError;
+                emit saveFailed(bookmarkError);
+                return false;
+            }
+        }
         return true;
     }
 
@@ -215,6 +267,15 @@ bool DocumentSession::saveNow(QString *errorMessage)
 
     m_annotationsFingerprint = annotationsFingerprint();
     saveReadingState();
+    if (m_bookmarkStore.isDirty()) {
+        QString bookmarkError;
+        if (!m_bookmarkStore.save(&bookmarkError)) {
+            if (errorMessage)
+                *errorMessage = bookmarkError;
+            emit saveFailed(bookmarkError);
+            return false;
+        }
+    }
     m_dirty = false;
     m_autosaveActive = false;
     m_autosaveTimer->stop();
@@ -233,6 +294,11 @@ void DocumentSession::flush()
         emit saveFailed(error);
     else
         saveReadingState();
+    if (m_bookmarkStore.isDirty()) {
+        QString bookmarkError;
+        if (!m_bookmarkStore.save(&bookmarkError))
+            emit saveFailed(bookmarkError);
+    }
     m_autosaveTimer->stop();
     m_maxTimer->stop();
 }
@@ -289,6 +355,11 @@ void DocumentSession::scheduleReadingSave()
         m_readingTimer->start();
 }
 
+bool DocumentSession::saveBookmarks(QString *errorMessage)
+{
+    return m_bookmarkStore.save(errorMessage);
+}
+
 ReadingState DocumentSession::readingState() const
 {
     ReadingState state;
@@ -298,7 +369,9 @@ ReadingState DocumentSession::readingState() const
     state.pageIndex = view()->currentPage();
     state.zoom = view()->zoom();
     state.rotation = view()->rotation();
-    state.zoomMode = m_zoomMode;
+    state.zoomMode = view()->zoomMode();
+    state.layoutMode = pageLayoutModeToString(view()->layoutMode());
+    state.firstPageAlone = view()->firstPageAlone();
     int anchorPage = 0;
     state.pagePoint = view()->viewportAnchor(&anchorPage);
     if (anchorPage >= 0)

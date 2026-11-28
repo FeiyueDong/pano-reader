@@ -3,36 +3,46 @@
 PANO 是一款本地优先的 PDF 阅读与标注工作区。它把 PDF 视为只读源文件，在独立的书库
 目录中保存标注、阅读状态和 Markdown 笔记；不依赖账号、云端或网络。
 
-当前版本是 Phase 1.2 标注与选择交互版本，包含书库管理、多标签阅读、两级图标工具栏、
-智能选择、文字/区域浮动操作、标注/笔记、按工具预设、主题和本机配置。Phase 0 的 Demo 已归档到 [`demo/`](demo/)，根
-工程不再依赖 Demo 代码。
+当前版本是 Phase 2 阅读与导航增强版本。在 Phase 1.2 的书库、标注和选择交互基础上，
+增加了四种页面布局、适合宽度/适合页面缩放模式、统一导航、全文搜索、书签、前进/后退、
+全屏、连续橡皮和标注复制粘贴。Phase 0 的 Demo 已归档到 [`demo/`](demo/)，根工程不再
+依赖 Demo 代码。
 
-![书库界面](docs/development/log/phase1-library.png)
+![阅读与布局](docs/development/log/phase2-reader.png)
 
-![阅读与标注](docs/development/log/phase1.2-reader.png)
+![全文搜索](docs/development/log/phase2-search.png)
 
-![文本选区浮动操作](docs/development/log/phase1.2-text-selection.png)
+![书签](docs/development/log/phase2-bookmarks.png)
+
+![全屏阅读](docs/development/log/phase2-fullscreen.png)
 
 ## 功能
 
 - 书库：创建/打开/切换书库，拷贝或映射导入 PDF，SHA-256 内容识别，重复导入提示，
   封面生成。
 - 组织：多级书架、收藏、回收站软删除/恢复/永久删除、搜索与排序。
-- 阅读：连续分页、页码跳转、固定比例/适合宽度/适合页面缩放、0/90/180/270 旋转。
+- 阅读：单页、连续单页、双页、连续双页四种布局；固定比例/适合宽度/适合页面缩放；
+  0/90/180/270 旋转；首页单独、页间距、滚轮翻页；滚动时按可见面积选择当前页。
+- 导航：统一导航入口；目录、缩略图、搜索、标注、书签和页码跳转共用页内定位；Alt+←/→
+  前进/后退；全屏 F11；阅读锚点随窗口/侧栏变化保持。
 - 标注：文字高亮/下划线/删除线，直线、矩形、椭圆、铅笔、荧光笔、对象橡皮；文字选区按
   行合并，减少词间空隙；直线/矩形/椭圆支持五种线型和描边开关。
 - 智能选择：选择工具单击文字进入文本选择，拖动空白框选区域；Ctrl 强制框选，Alt 强制
-  文本选择。文本和区域选区显示贴近选区的浮动操作条。
+  文本选择。文本和区域选区显示贴近选区的浮动操作条；支持文字/区域右键菜单。
+- 搜索与书签：Ctrl+F 全文搜索，结果列表按页显示并可前后跳转，临时高亮不写入标注；
+  Ctrl+B 添加书签，书签独立保存、重命名、排序和删除。
 - 阅读界面：两行图标工具栏（主工具 + 当前工具/对象属性）、目录/页面缩略图/标注左侧栏、
   笔记/详情右侧栏；工具和属性可直接编辑。
-- 笔记：标注附带的 Markdown 笔记，支持图片、区域截图、行内/独立公式的本地渲染；编辑
-  时 2 秒空闲自动保存，30 秒最长等待。
+- 笔记与标注操作：标注附带 Markdown 笔记、图片、区域截图和本地公式渲染；笔记 2 秒
+  空闲自动保存。选择对象可复制/粘贴/复制一份，使用自定义 MIME 保留完整样式。
 - 工具预设：每个工具独立保存颜色、线宽、线型、描边、填充、透明度和混合模式；新建
   标注不受其他工具或旧标注影响。设置窗口修改按工具暂存，应用/确定才写入。
 - 书库：三栏浏览、封面/列表切换、面包屑、直接子书架书籍、拖拽加入书架/收藏/回收站。
 - 工作区：书库标签页 + 可关闭的阅读标签页；每个标签独立保存阅读状态、阅读锚点和撤销
   历史。
-- 可靠性：`QSaveFile` 原子写入、书库单实例锁、外部修改检测、源 PDF 哈希校验。
+- 橡皮：按住拖动连续擦除对象，半径 4–25 px 可调，一次拖动一步撤销，带笔记对象需确认。
+- 可靠性：`QSaveFile` 原子写入、书库单实例锁、外部修改检测、源 PDF 哈希校验；永久删除
+  使用隔离目录和恢复标记，失败可回滚。
 - 外观：四套主题（现代浅色、经典、暖色、现代深色），界面字体与标注默认样式可调。
 
 主题示例：
@@ -84,17 +94,19 @@ xmake -j4
   books/<book>/
     document.json
     annotations.json
+    bookmarks.json
     source.pdf       # 仅拷贝模式
     cover.png
     assets/
   bookshelf/shelves.json
   state/reading.json
   state/history.json
+  .pending-delete/    # 永久删除隔离与恢复标记
   .pano.lock
 ```
 
 本机配置（主题、上次书库、打开标签、映射源覆盖）放在 Qt 配置目录，不写入书库。
-完整字段与语义见 [`docs/specification/phase1-data-formats.md`](docs/specification/phase1-data-formats.md)。
+完整字段与语义见 [`docs/specification/phase1-data-formats.md`](docs/specification/phase1-data-formats.md)（Phase 2 增补了布局、缩放模式和书签字段）。
 
 原则：
 
@@ -112,16 +124,18 @@ xmake -j4                                  # 全部目标
 ./build/linux/x86_64/debug/pano-coordinate-probe
 ./build/linux/x86_64/debug/pano-text-geometry-probe
 ./build/linux/x86_64/debug/pano-interaction-probe
+./build/linux/x86_64/debug/pano-phase2-probe
+./build/linux/x86_64/debug/pano-pdf-timing examples/sample-paper.pdf
 PANO_CONFIG_DIR=/tmp/pano-config QT_QPA_PLATFORM=offscreen \
   ./build/linux/x86_64/debug/pano-theme-probe
 ```
 
 探针覆盖数据安全、导入与哈希、书架不变量、标注/笔记持久化、外部修改保护、阅读状态、
-四种旋转与滚动坐标变换、文字选区合并、智能选择与浮动操作、主题与设置取消；不替代
-人工 GUI 验收。结果记录在
-[`docs/development/log/phase1.2-results.md`](docs/development/log/phase1.2-results.md)，
-Phase 1.1 见 [`phase1.1-results.md`](docs/development/log/phase1.1-results.md)，Phase 1
-基线见 [`phase1-results.md`](docs/development/log/phase1-results.md)。
+四种旋转与滚动坐标变换、文字选区合并、智能选择与浮动操作、主题与设置取消、四种页面
+布局、缩放模式、搜索/书签/导航和复制粘贴；不替代人工 GUI 验收。结果记录在
+[`docs/development/log/phase2-results.md`](docs/development/log/phase2-results.md)，
+Phase 1.2 见 [`phase1.2-results.md`](docs/development/log/phase1.2-results.md)，Phase 1.1
+见 [`phase1.1-results.md`](docs/development/log/phase1.1-results.md)。
 
 ## 目录
 
@@ -143,15 +157,13 @@ Phase 1.1 见 [`phase1.1-results.md`](docs/development/log/phase1.1-results.md)�
 
 ## 已知限制
 
-- 只在 Linux 上验证；Windows 未实际构建。
-- 高 DPI、超大 PDF、真实鼠标的复杂标注/旋转操作仍需人工验收；本轮已检查
-  1440×900 下的书库/阅读/主题截图。
-- 文字选择限制在单页；扫描 PDF 没有 OCR；不支持 PDF 导出；双栏英文论文的跨栏选区
-  仍建议人工复核。
-- 公式渲染覆盖常用子集，不支持的 TeX 命令会以源码或占位显示。
-- 橡皮为点击式删除，尚未实现连续擦除。
-- 多级书架、拖拽、缩略图和设置取消/应用已实现并做过程序化检查，但复杂交互仍建议人工
-  走查。
+- 只在 Linux 上验证；Windows/高 DPI 未实际构建验收。
+- 搜索只针对 PDF 文本层；扫描 PDF 无可搜索文本。文字选择限制在单页；不支持 OCR 或
+  PDF 导出；双栏论文跨栏选区仍建议人工复核。
+- P01 大 PDF 打开性能只做了文档加载/首屏测量（864 页扫描件：load 5 ms、几何 97 ms、
+  首屏 45 ms，本机 Qt PDF），未做完整 1–2 秒停顿的 GUI 剖析。
+- 全屏只保留阅读画布，退出依赖 F11/Esc；工具栏/菜单在部分主题下仍有细节样式可打磨。
+- 多文档切换、缩略图快速切换、真实拖拽手势和大书库回归仍需人工验收。
 - 本阶段不包含云同步、账号、移动端或多人协作。
 
 ## 许可
