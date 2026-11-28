@@ -1,6 +1,6 @@
 #include "BookmarkStore.h"
 
-#include "storage/JsonUtils.h"
+#include "common/JsonUtils.h"
 
 #include <QDir>
 #include <QFile>

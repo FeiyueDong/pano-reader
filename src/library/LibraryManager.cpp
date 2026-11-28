@@ -16,7 +16,7 @@
 #include <algorithm>
 
 #include "pdf/PdfDocument.h"
-#include "storage/JsonUtils.h"
+#include "common/JsonUtils.h"
 #include "storage/LibraryStore.h"
 
 namespace pano {

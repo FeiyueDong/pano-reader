@@ -19,7 +19,7 @@
 #include "settings/SettingsManager.h"
 #include "reader/PageLayout.h"
 #include "reader/PdfView.h"
-#include "storage/JsonUtils.h"
+#include "common/JsonUtils.h"
 #include "storage/LibraryStore.h"
 
 namespace pano {

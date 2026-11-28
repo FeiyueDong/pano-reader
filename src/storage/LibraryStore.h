@@ -7,7 +7,7 @@
 #include <QObject>
 #include <QString>
 
-#include "library/LibraryTypes.h"
+#include "common/LibraryTypes.h"
 
 class QLockFile;
 

@@ -14,7 +14,7 @@
 #include "annotation/AnnotationModel.h"
 #include "pdf/PdfDocument.h"
 #include "pdf/PageRenderer.h"
-#include "library/LibraryTypes.h"
+#include "common/LibraryTypes.h"
 #include "reader/PageLayout.h"
 
 class QRubberBand;

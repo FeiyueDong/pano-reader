@@ -7,7 +7,7 @@
 #include <QString>
 
 #include "annotation/Annotation.h"
-#include "library/LibraryTypes.h"
+#include "common/LibraryTypes.h"
 #include "document/BookmarkStore.h"
 #include "note/NoteModel.h"
 #include "note/NoteTree.h"

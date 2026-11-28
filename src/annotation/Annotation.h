@@ -8,6 +8,8 @@
 #include <QRectF>
 #include <QString>
 #include <QVector>
+
+#include "common/TimeUtils.h"
 #include <Qt>
 
 namespace pano {
@@ -98,7 +100,6 @@ QString lineStyleDisplayName(LineStyle style);
 bool lineStyleFromString(const QString &name, LineStyle *style);
 Qt::PenStyle toPenStyle(LineStyle style);
 
-QString nowIsoUtc();
 QString newAnnotationId();
 
 } // namespace pano

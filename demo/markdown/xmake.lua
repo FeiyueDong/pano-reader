@@ -6,7 +6,7 @@ local jkqt = os.getenv("JKQT_ROOT")
     or path.join(os.projectdir(), "build/deps/jkqt/usr")
 
 target("pano-markdown-demo")
-    set_kind("binary")
+    add_rules("qt.widgetapp")
     add_files(path.join(demo_dir, "src/**.cpp"))
     add_files(path.join(demo_dir, "src/**.h"))
     add_frameworks("QtWidgets")

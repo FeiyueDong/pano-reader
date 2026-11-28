@@ -8,7 +8,7 @@
 #include <QTextStream>
 
 #include "library/LibraryManager.h"
-#include "library/LibraryTypes.h"
+#include "common/LibraryTypes.h"
 #include "storage/LibraryStore.h"
 
 using namespace pano;

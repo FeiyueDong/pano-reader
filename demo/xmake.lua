@@ -6,6 +6,7 @@ local demo_dir = os.scriptdir()
 local qt_prefix = get_config("qt") or os.getenv("PANO_QT_PREFIX")
 
 target("pano-demo-reader")
+    add_rules("qt.widgetapp")
     add_files(path.join(demo_dir, "src/**.cpp"))
     add_files(path.join(demo_dir, "src/**.h"))
     add_frameworks("QtWidgets", "QtPdf")
@@ -16,7 +17,7 @@ target("pano-demo-reader")
     end
 
 target("pano-demo-preview-probe")
-    set_kind("binary")
+    add_rules("qt.widgetapp")
     add_files(path.join(demo_dir, "tools/preview_probe.cpp"))
     add_files(path.join(demo_dir, "src/note/MarkdownRenderer.cpp"))
     add_files(path.join(demo_dir, "src/note/MathRenderer.cpp"))
@@ -29,7 +30,7 @@ target("pano-demo-preview-probe")
     end
 
 target("pano-demo-coordinate-probe")
-    set_kind("binary")
+    add_rules("qt.console")
     add_files(path.join(demo_dir, "tools/coordinate_probe.cpp"))
     add_files(path.join(demo_dir, "src/reader/PageLayout.cpp"))
     add_frameworks("QtGui")
@@ -39,7 +40,7 @@ target("pano-demo-coordinate-probe")
     end
 
 target("pano-demo-math-probe")
-    set_kind("binary")
+    add_rules("qt.widgetapp")
     add_files(path.join(demo_dir, "tools/math_probe.cpp"))
     add_files(path.join(demo_dir, "src/note/MathRenderer.cpp"))
     add_frameworks("QtWidgets")
@@ -49,7 +50,7 @@ target("pano-demo-math-probe")
     end
 
 target("pano-demo-ui-probe")
-    set_kind("binary")
+    add_rules("qt.widgetapp")
     add_files(path.join(demo_dir, "src/app/*.cpp"))
     add_files(path.join(demo_dir, "src/pdf/*.cpp"))
     add_files(path.join(demo_dir, "src/reader/*.cpp"))
@@ -71,7 +72,7 @@ target("pano-demo-ui-probe")
     end
 
 target("pano-demo-flow-probe")
-    set_kind("binary")
+    add_rules("qt.widgetapp")
     add_files(path.join(demo_dir, "src/app/*.cpp"))
     add_files(path.join(demo_dir, "src/pdf/*.cpp"))
     add_files(path.join(demo_dir, "src/reader/*.cpp"))

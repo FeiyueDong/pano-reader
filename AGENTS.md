@@ -7,10 +7,15 @@
 用户已授权在本机对 PANO 进行构建、运行、截图和真实视觉检查：
 
 ```bash
-# 默认：正式程序 + 正式探针，不包含任何 Demo
+# 默认：正式程序及内部静态库，不包含测试、诊断或 Demo
 xmake f -c -m debug --qt=/home/yue/Qt/6.12.0/gcc_64 \
-  --build_demo=n --build_markdown_demo=n
+  --build_tests=n --build_tools=n --build_demo=n --build_markdown_demo=n
 xmake -j4
+
+# 功能探针 / 性能诊断
+xmake f -c -m debug --qt=/home/yue/Qt/6.12.0/gcc_64 --build_tests=y
+xmake -j4
+xmake f -m debug --build_tools=y
 ```
 
 Demo 默认关闭，由两个独立根选项按需包含：
@@ -20,9 +25,11 @@ Demo 默认关闭，由两个独立根选项按需包含：
 `xmake f -c` 清理配置，必要时删除 `build/.deps`、`build/.gens`、`build/.objs`、
 `build/.build_cache`，避免旧 target 缓存残留。
 
-- 更改 Qt/C++ 代码后至少运行一次 `xmake -j4`；涉及数据层时运行
-  `pano-library-probe`；涉及阅读器坐标时运行 `pano-coordinate-probe`；涉及文字选区
-  合并时运行 `pano-text-geometry-probe`；涉及主界面/会话时运行 `pano-phase1-probe`。
+- 更改 Qt/C++ 代码后至少运行一次 `xmake -j4`；探针位于 `tests/`，需要
+  `--build_tests=y`；涉及数据层时运行 `pano-library-probe`；涉及阅读器坐标时运行
+  `pano-coordinate-probe`；涉及文字选区合并时运行 `pano-text-geometry-probe`；
+  涉及主界面/会话时运行 `pano-phase1-probe`。性能诊断位于 `tools/`，需要
+  `--build_tools=y`。
 - 视觉检查使用真实运行或离屏探针生成的截图；不要把“编译通过”当作视觉验收。
 - 探针是稀疏检查，不替代人工 GUI 测试。添加探针时优先覆盖数据安全、格式契约、
   坐标变换和持久化闭环，避免为每个控件写脆弱的 UI 测试。

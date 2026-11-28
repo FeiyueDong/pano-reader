@@ -3,7 +3,7 @@
 #include <QObject>
 #include <QVector>
 
-#include "library/LibraryTypes.h"
+#include "common/LibraryTypes.h"
 
 namespace pano {
 

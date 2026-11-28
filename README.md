@@ -74,13 +74,16 @@ Phase 0 的 PDF Demo 和 Phase 3.0 Markdown Demo 归档在 [`demo/`](demo/)，�
 
 ## 构建
 
-根目录 `xmake.lua` 是仓库唯一正式构建入口。默认只构建正式程序及其探针，不探测或
-链接任何 Demo 依赖：
+根目录 `xmake.lua` 是仓库唯一正式构建入口。默认只构建正式程序及其内部静态库，
+不探测或链接测试、诊断与 Demo 依赖：
 
 ```bash
-xmake f -c -m debug --qt=/path/to/Qt/6.x.y/gcc_64 --build_demo=n --build_markdown_demo=n
+xmake f -c -m debug --qt=/path/to/Qt/6.x.y/gcc_64 \
+  --build_tests=n --build_tools=n --build_demo=n --build_markdown_demo=n
 xmake -j4
 ```
+
+默认只构建 `pano-reader` 及其内部静态库；测试探针、性能诊断和两个 Demo 都需要显式开启。
 
 `--qt` 必须指向包含 `QtWidgets`、`QtPdf` 的 Qt 6 SDK 前缀；如果系统 Qt 的 PDF
 部件版本不一致，自动探测可能选错 SDK，因此建议显式传入。
@@ -88,10 +91,20 @@ xmake -j4
 可执行文件位于 `build/linux/x86_64/debug/pano-reader`（Linux）。发布构建把
 `-m debug` 换成 `-m release`。
 
-### 可选 Demo
+### 可选测试、诊断与 Demo
 
-两个独立选项默认均为 `n`；只有显式启用时才包含对应局部 xmake targets。切换选项后
+四个独立选项默认均为 `n`；只有显式启用时才包含对应局部 xmake targets。切换选项后
 建议先执行 `xmake f -c`，避免旧配置和目标缓存残留。
+
+```bash
+# 功能回归探针
+xmake f -c -m debug --qt=/path/to/Qt/6.x.y/gcc_64 --build_tests=y --build_tools=n
+xmake -j4
+
+# 性能诊断
+xmake f -c -m debug --qt=/path/to/Qt/6.x.y/gcc_64 --build_tests=n --build_tools=y
+xmake -j4
+```
 
 ```bash
 # Phase 0 PDF Demo（targets 以 pano-demo- 开头）
@@ -104,8 +117,8 @@ xmake build -j4 pano-markdown-demo
 ```
 
 Markdown Demo 依赖准备与详细说明见 [`demo/markdown/README.md`](demo/markdown/README.md)。
-关闭 Demo 时重新配置两个选项为 `n` 即可；官方正式目标名称（`pano-reader`、
-`pano-*-probe` 等）保持不变。
+关闭 Demo 时重新配置两个选项为 `n` 即可；正式目标名称（`pano-reader`、内部 `pano-*` 库）保持不变；
+探针名称仅在 `--build_tests=y` 时出现。
 
 ## 运行
 
@@ -154,6 +167,7 @@ Phase 3.1 起 `annotations.json` 使用 `schema_version: 2`，同时保存 `anno
 
 ```bash
 xmake -j4                                  # 全部目标
+# 先使用 --build_tests=y 配置并构建
 ./build/linux/x86_64/debug/pano-library-probe
 ./build/linux/x86_64/debug/pano-phase1-probe examples/sample-paper.pdf build/probe/phase1-ui.png
 ./build/linux/x86_64/debug/pano-coordinate-probe

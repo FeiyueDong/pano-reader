@@ -16,7 +16,7 @@
 #include "annotation/AnnotationCommands.h"
 #include "document/DocumentSession.h"
 #include "library/LibraryManager.h"
-#include "library/LibraryTypes.h"
+#include "common/LibraryTypes.h"
 #include "note/Note.h"
 #include "note/NoteTree.h"
 #include "reader/PdfView.h"

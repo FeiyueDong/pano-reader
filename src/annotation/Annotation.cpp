@@ -1,4 +1,5 @@
 #include "Annotation.h"
+#include "common/TimeUtils.h"
 #include "AnnotationGeometry.h"
 
 #include <QDateTime>
@@ -534,11 +535,6 @@ Qt::PenStyle toPenStyle(LineStyle style)
     default:
         return Qt::SolidLine;
     }
-}
-
-QString nowIsoUtc()
-{
-    return QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
 }
 
 QString newAnnotationId()

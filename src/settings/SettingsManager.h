@@ -4,7 +4,7 @@
 #include <QString>
 #include <QStringList>
 
-#include "library/LibraryTypes.h"
+#include "common/LibraryTypes.h"
 #include "settings/ToolPresets.h"
 
 namespace pano {

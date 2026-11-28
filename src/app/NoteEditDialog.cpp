@@ -1,5 +1,7 @@
 #include "app/NoteEditDialog.h"
 
+#include "common/TimeUtils.h"
+
 #include <QCloseEvent>
 #include <QDialogButtonBox>
 #include <QFormLayout>
