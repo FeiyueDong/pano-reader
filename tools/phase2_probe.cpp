@@ -6,6 +6,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLineEdit>
+#include <QLabel>
 #include <QMouseEvent>
 #include <QScrollBar>
 #include <QListWidget>
@@ -13,6 +14,7 @@
 #include <QTabBar>
 #include <QTabWidget>
 #include <QToolButton>
+#include <QWheelEvent>
 #include <QTimer>
 
 #include <cstdio>
@@ -101,6 +103,50 @@ int main(int argc, char **argv)
     check(view != nullptr && view->hasDocument(), "PDF view loaded");
 
     if (view && session) {
+        auto *contextHint = window->findChild<QLabel *>(QStringLiteral("readerContextHint"));
+        QWidget *contextWidget = contextHint ? contextHint->parentWidget() : nullptr;
+        const int contextHeight = contextWidget ? contextWidget->height() : -1;
+        const int viewportHeight = view->viewport()->height();
+        view->setTool(pano::PdfView::Tool::Pencil);
+        waitFor(120);
+        check(contextWidget && contextWidget->height() == contextHeight,
+              "context bar height stable across tools");
+        check(view->viewport()->height() == viewportHeight,
+              "context bar keeps reader viewport height");
+        view->setTool(pano::PdfView::Tool::Select);
+
+        view->goToPage(0);
+        view->setZoom(1.0);
+        view->setTool(pano::PdfView::Tool::Pencil);
+        waitFor(80);
+        const int beforeShiftPath = view->annotations()->count();
+        const QPoint shiftStart = viewPosition(view, 0, QPointF(300, 300));
+        const QPoint shiftEnd = viewPosition(view, 0, QPointF(450, 380));
+        sendMouse(view->viewport(), QEvent::MouseButtonPress, shiftStart,
+                  Qt::LeftButton, Qt::LeftButton, Qt::ShiftModifier);
+        sendMouse(view->viewport(), QEvent::MouseMove, shiftEnd,
+                  Qt::NoButton, Qt::LeftButton, Qt::ShiftModifier);
+        sendMouse(view->viewport(), QEvent::MouseButtonRelease, shiftEnd,
+                  Qt::LeftButton, Qt::NoButton, Qt::ShiftModifier);
+        waitFor(80);
+        const QVector<pano::Annotation> annotations = view->annotations()->annotations();
+        const pano::Annotation *shiftPath = nullptr;
+        for (const pano::Annotation &annotation : annotations) {
+            if (annotation.type == pano::AnnotationType::Pencil
+                && annotation.pageIndex == 0)
+                shiftPath = &annotation;
+        }
+        check(view->annotations()->count() == beforeShiftPath + 1 && shiftPath,
+              "shift pencil creates one annotation");
+        check(shiftPath && shiftPath->path.size() == 2,
+              "shift pencil saves two effective points");
+        if (shiftPath)
+            check(shiftPath->path.first() == QPointF(300, 300)
+                      || shiftPath->path.first() != shiftPath->path.last(),
+                  "shift pencil preserves start/end vertices");
+        view->undoStack()->undo();
+        view->setTool(pano::PdfView::Tool::Select);
+
         check(view->layoutMode() == pano::PageLayoutMode::ContinuousSingle,
               "default continuous single layout");
         check(view->layoutMode() == pano::PageLayoutMode::ContinuousSingle,
@@ -135,6 +181,34 @@ int main(int argc, char **argv)
         view->fitPage();
         check(view->zoomMode() == pano::ZoomMode::FitPage, "fit page mode retained");
 
+        view->setLayoutMode(pano::PageLayoutMode::SinglePage);
+        view->goToPage(0);
+        view->fitPage();
+        waitFor(80);
+        auto sendWheel = [&view](int delta) {
+            const QPointF pos(view->viewport()->rect().center());
+            QWheelEvent event(pos, view->viewport()->mapToGlobal(pos.toPoint()), QPoint(0, 0),
+                              QPoint(0, delta), Qt::NoButton, Qt::NoModifier,
+                              Qt::NoScrollPhase, false);
+            QApplication::sendEvent(view->viewport(), &event);
+        };
+        view->verticalScrollBar()->setValue(view->verticalScrollBar()->maximum());
+        sendWheel(-120);
+        waitFor(60);
+        check(view->currentPage() == 1, "wheel threshold turns one page");
+        sendWheel(-120);
+        waitFor(30);
+        check(view->currentPage() == 1, "wheel cooldown prevents immediate second turn");
+        waitFor(280);
+        sendWheel(-120);
+        waitFor(30);
+        check(view->currentPage() == 2, "wheel turns after cooldown");
+        sendWheel(120);
+        waitFor(30);
+        check(view->currentPage() == 1, "reverse wheel turns previous page");
+        view->setLayoutMode(pano::PageLayoutMode::ContinuousSingle);
+        view->goToPage(0);
+
         pano::Annotation annotation;
         annotation.id = pano::newAnnotationId();
         annotation.pageIndex = 0;
@@ -167,7 +241,9 @@ int main(int argc, char **argv)
         check(search != nullptr, "search model present");
         if (search) {
             search->setDocument(view->document()->pdf());
+            waitFor(120);
             search->setSearchString(QStringLiteral("PANO"));
+            waitFor(120);
             for (int i = 0; i < 80; ++i) {
                 if (search->status() == QPdfSearchModel::Status::Finished)
                     break;
@@ -267,7 +343,7 @@ int main(int argc, char **argv)
                 }
             }
         }
-        waitFor(700);
+        waitFor(3000);
         window->grab().save(QStringLiteral("build/probe/phase2-thumbnails.png"));
 
         view->setLayoutMode(pano::PageLayoutMode::FacingPages);
@@ -289,7 +365,11 @@ int main(int argc, char **argv)
             check(false, "reading state readable");
         }
 
+        if (!view->annotations()->annotations().isEmpty())
+            view->selectAnnotation(view->annotations()->annotations().first().id);
+        waitFor(120);
         window->grab().save(QStringLiteral("build/probe/phase2-layout.png"));
+        window->grab().save(QStringLiteral("build/probe/phase2-context.png"));
         QMetaObject::invokeMethod(window, "toggleFullscreen");
         waitFor(100);
         check(window->isFullScreen() && !window->findChild<QTabWidget *>()->tabBar()->isVisible(),

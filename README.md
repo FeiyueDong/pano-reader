@@ -3,19 +3,19 @@
 PANO 是一款本地优先的 PDF 阅读与标注工作区。它把 PDF 视为只读源文件，在独立的书库
 目录中保存标注、阅读状态和 Markdown 笔记；不依赖账号、云端或网络。
 
-当前版本是 Phase 2.1 阅读器交互与界面精修版本。在 Phase 2 的布局、搜索、书签、历史
-和全屏基础上，重排了阅读器界面：顶部两级工具栏、左侧目录/缩略图/书签/查找、右侧
-标注/笔记/详情、底部状态区；并修复全屏退出、连续橡皮、非连续滚轮翻页、页码控件、
-历史出发点和滚动范围。Phase 0 的 Demo 已归档到 [`demo/`](demo/)，根工程不再依赖
-Demo 代码。
+当前版本是 Phase 2.2 阅读器稳定与回归修复版本。在 Phase 2.1 的顶部两级工具栏、
+三栏阅读工作区和四种页面布局基础上，修复了非连续滚轮翻页、Shift 铅笔/荧光笔路径、
+统一 Esc 分层、属性栏高度抖动、缩略图可见范围/缓存/失败重试、页码按钮语义、不透明度
+提交、全屏查找和搜索计数；并保留 Phase 2 的搜索、书签、历史、全屏和连续橡皮。
+Phase 0 的 Demo 已归档到 [`demo/`](demo/)，根工程不再依赖 Demo 代码。
 
-![阅读器](docs/development/log/phase2.1-reader.png)
+![阅读器](docs/development/log/phase2.2-layout.png)
 
-![查找](docs/development/log/phase2.1-search.png)
+![缩略图](docs/development/log/phase2.2-thumbnails.png)
 
-![缩略图](docs/development/log/phase2.1-thumbnails.png)
+![查找](docs/development/log/phase2.2-search.png)
 
-![全屏](docs/development/log/phase2.1-fullscreen.png)
+![全屏](docs/development/log/phase2.2-fullscreen.png)
 
 ## 功能
 
@@ -34,8 +34,11 @@ Demo 代码。
   Ctrl+B 添加书签，书签独立保存、重命名、排序和删除。
 - 阅读界面：顶部主工具栏（阅读导航/缩放/布局/工具/辅助）+ 当前工具/对象属性栏；
   左侧目录/缩略图/书签/查找，右侧标注/笔记/详情；底部仅状态区。工具和属性可直接编辑。
-- 阅读交互：页码输入 + 上一页/下一页；非连续布局滚轮翻页、组语义和反向定位；全屏
-  F11/右上角退出；导航历史记录真实出发点；大文档打开计时探针。
+- 阅读交互：页码输入 + 上一页/下一页；非连续布局滚轮翻页、组语义和反向定位；页按钮
+  与 PageUp/PageDown 语义分离；全屏 F11/右上角退出；统一 Esc 分层；导航历史记录真实
+  出发点；大文档打开计时探针。
+- 阅读稳定性：属性栏固定单行高度；缩略图按可见范围异步加载、缓存命中直接显示、失败
+  有限重试；不透明度修改防抖提交；全屏查找先恢复全屏外查找面板。
 - 笔记与标注操作：标注附带 Markdown 笔记、图片、区域截图和本地公式渲染；笔记 2 秒
   空闲自动保存。选择对象可复制/粘贴/复制一份，使用自定义 MIME 保留完整样式。
 - 工具预设：每个工具独立保存颜色、线宽、线型、描边、填充、透明度和混合模式；新建
@@ -109,7 +112,7 @@ xmake -j4
 ```
 
 本机配置（主题、上次书库、打开标签、映射源覆盖）放在 Qt 配置目录，不写入书库。
-完整字段与语义见 [`docs/specification/phase1-data-formats.md`](docs/specification/phase1-data-formats.md)（Phase 2/2.1 增补了布局、缩放模式、书签字段、滚轮翻页和阅读器面板宽度）。
+完整字段与语义见 [`docs/specification/phase1-data-formats.md`](docs/specification/phase1-data-formats.md)（Phase 2/2.1/2.2 增补了布局、缩放模式、书签字段、滚轮翻页、缩略图并发语义和阅读器面板宽度）。
 
 原则：
 
@@ -136,10 +139,11 @@ PANO_CONFIG_DIR=/tmp/pano-config QT_QPA_PLATFORM=offscreen \
 
 探针覆盖数据安全、导入与哈希、书架不变量、标注/笔记持久化、外部修改保护、阅读状态、
 四种旋转与滚动坐标变换、文字选区合并、智能选择与浮动操作、主题与设置取消、四种页面
-布局、缩放模式、搜索/书签/导航、复制粘贴、橡皮连续擦除、阅读器交互与全屏退出；不替代
-人工 GUI 验收。结果记录在
-[`docs/development/log/phase2.1-results.md`](docs/development/log/phase2.1-results.md)，
-Phase 2 见 [`phase2-results.md`](docs/development/log/phase2-results.md)，Phase 1.2 见
+布局、缩放模式、搜索/书签/导航、复制粘贴、橡皮连续擦除、滚轮翻页冷却、Shift 两点路径、
+属性栏高度、缩略图缓存与全屏退出；不替代人工 GUI 验收。结果记录在
+[`docs/development/log/phase2.2-results.md`](docs/development/log/phase2.2-results.md)，
+Phase 2.1 见 [`phase2.1-results.md`](docs/development/log/phase2.1-results.md)，Phase 2
+见 [`phase2-results.md`](docs/development/log/phase2-results.md)，Phase 1.2 见
 [`phase1.2-results.md`](docs/development/log/phase1.2-results.md)。
 
 ## 目录
@@ -166,8 +170,10 @@ Phase 2 见 [`phase2-results.md`](docs/development/log/phase2-results.md)，Phas
 - 搜索只针对 PDF 文本层；扫描 PDF 无可搜索文本。文字选择限制在单页；不支持 OCR 或
   PDF 导出；双栏论文跨栏选区仍建议人工复核。
 - P01 大 PDF 打开性能只做了文档加载/首屏测量（864 页扫描件：load 5 ms、几何 97 ms、
-  首屏 45 ms，本机 Qt PDF），未做完整 1–2 秒停顿的 GUI 剖析。
-- 全屏只保留阅读画布，退出依赖 F11/Esc；工具栏/菜单在部分主题下仍有细节样式可打磨。
+  首屏 45 ms，本机 Qt PDF）；应用打开路径仍同步计算全文件 SHA-256，约 1 秒，异步化
+  留待后续阶段。
+- 全屏只保留阅读画布和右上角退出按钮，F11/Esc 可用；工具栏/菜单在部分主题下仍有细节
+  样式可打磨。
 - 多文档切换、缩略图快速切换、真实拖拽手势和大书库回归仍需人工验收。
 - 本阶段不包含云同步、账号、移动端或多人协作。
 

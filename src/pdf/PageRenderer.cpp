@@ -93,8 +93,10 @@ void PageRenderer::onPageRendered(int pageIndex, QSize imageSize, const QImage &
     m_pendingById.remove(requestId);
     m_pendingByKey.remove(key);
 
-    if (image.isNull() || !m_document)
+    if (image.isNull() || !m_document) {
+        emit pageFailed(pageIndex, imageSize, requestId);
         return;
+    }
 
     if (m_cache.contains(key)) {
         m_cacheBytes -= m_cache.value(key).sizeInBytes();

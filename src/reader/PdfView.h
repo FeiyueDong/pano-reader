@@ -111,6 +111,7 @@ public:
     void goToPage(int pageIndex);
     void goToPosition(int pageIndex, const QPointF &pagePoint);
     void navigatePageStep(int direction, bool history = false);
+    void scrollPageViewport(int direction);
     void navigateTo(int pageIndex, const QPointF &pagePoint = QPointF(),
                     NavigationAlignment alignment = NavigationAlignment::PageTop,
                     NavigationReason reason = NavigationReason::Programmatic);
@@ -301,8 +302,11 @@ private:
     QSet<QString> m_erasePreviewIds;
     QVector<Annotation> m_eraseRemoved;
     bool m_eraseProtectedHinted = false;
-    int m_wheelAccum = 0;
+    int m_wheelAngleAccum = 0;
+    qreal m_wheelPixelAccum = 0.0;
+    int m_wheelLastDirection = 0;
     QElapsedTimer m_wheelCooldown;
+    bool m_drawShift = false;
 
     int m_textHitPage = -1;
     QPointF m_textHitPoint;

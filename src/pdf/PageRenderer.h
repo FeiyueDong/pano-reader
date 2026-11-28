@@ -37,6 +37,7 @@ public:
 
 signals:
     void pageReady(int pageIndex, const QSize &pixelSize, const QImage &image, quint64 requestId);
+    void pageFailed(int pageIndex, const QSize &pixelSize, quint64 requestId);
     void cacheChanged();
 
 private slots:

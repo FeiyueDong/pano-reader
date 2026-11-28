@@ -50,7 +50,10 @@ xmake -j4
 
 ## Phase 2 探针
 
-- `pano-phase2-probe` 覆盖四种页面布局、缩放模式、复制粘贴、书签、搜索、全屏和
-  连续橡皮；涉及 `bookmarks.json`、`reading.json` 布局字段时必须运行。
+- `pano-phase2-probe` 覆盖四种页面布局、缩放模式、复制粘贴、书签、搜索、全屏、连续
+  橡皮、滚轮翻页冷却、Shift 两点路径和属性栏高度；涉及 `bookmarks.json`、
+  `reading.json` 布局字段或阅读器交互时必须运行。
+- 缩略图/全屏/查找相关改动还应目视检查 `build/probe/phase2-layout.png`、
+  `phase2-thumbnails.png`、`phase2-search.png`、`phase2-fullscreen.png`。
 - `pano-pdf-timing` 用于大 PDF 打开/首屏测量，例如
   `./build/linux/x86_64/debug/pano-pdf-timing "/path/to/book.pdf"`。

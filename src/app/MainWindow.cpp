@@ -1,6 +1,7 @@
 #include "app/MainWindow.h"
 
 #include <QAction>
+#include <QAbstractSpinBox>
 #include <QActionGroup>
 #include <QApplication>
 #include <QElapsedTimer>
@@ -23,8 +24,10 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMenuBar>
+#include <QPlainTextEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QTextEdit>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStandardPaths>
@@ -80,6 +83,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_settings, &SettingsManager::settingsChanged, this, &MainWindow::applyThemeFromSettings);
 
     setAcceptDrops(true);
+    qApp->installEventFilter(this);
     setWindowTitle(QStringLiteral("PANO"));
     resize(1440, 900);
     m_tabs->setCurrentIndex(0);
@@ -89,6 +93,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    qApp->removeEventFilter(this);
     for (DocumentSession *session : m_sessions)
         session->flush();
     while (!m_sessions.isEmpty()) {
@@ -1091,14 +1096,12 @@ void MainWindow::toggleFullscreen()
         if (ReaderWorkspace *workspace = currentWorkspace())
             workspace->setFullscreenMode(true);
         showFullScreen();
-        qApp->installEventFilter(this);
     } else {
         m_fullscreen = false;
         if (m_fullscreenAction) {
             m_fullscreenAction->setChecked(false);
             m_fullscreenAction->setText(tr("全屏"));
         }
-        qApp->removeEventFilter(this);
         showNormal();
         if (!m_savedGeometry.isEmpty())
             restoreGeometry(m_savedGeometry);
@@ -1114,13 +1117,26 @@ void MainWindow::toggleFullscreen()
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
-    if (m_fullscreen && event->type() == QEvent::KeyPress) {
-        auto *keyEvent = static_cast<QKeyEvent *>(event);
-        if (keyEvent->key() == Qt::Key_Escape) {
-            if (ReaderWorkspace *workspace = currentWorkspace()) {
-                if (workspace->closeTransientUi())
-                    return true;
-            }
+    Q_UNUSED(watched);
+    if (event->type() != QEvent::KeyPress)
+        return QMainWindow::eventFilter(watched, event);
+    auto *keyEvent = static_cast<QKeyEvent *>(event);
+    if (keyEvent->key() != Qt::Key_Escape || keyEvent->isAutoRepeat())
+        return QMainWindow::eventFilter(watched, event);
+    if (QApplication::activeWindow() != this)
+        return QMainWindow::eventFilter(watched, event);
+    if (QApplication::activeModalWidget() || QApplication::activePopupWidget())
+        return QMainWindow::eventFilter(watched, event);
+
+    QWidget *focus = QApplication::focusWidget();
+    if (qobject_cast<QLineEdit *>(focus) || qobject_cast<QPlainTextEdit *>(focus)
+        || qobject_cast<QTextEdit *>(focus) || qobject_cast<QAbstractSpinBox *>(focus))
+        return QMainWindow::eventFilter(watched, event);
+
+    if (ReaderWorkspace *workspace = currentWorkspace()) {
+        if (workspace->closeTransientUi())
+            return true;
+        if (m_fullscreen) {
             toggleFullscreen();
             return true;
         }

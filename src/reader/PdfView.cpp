@@ -53,6 +53,26 @@ bool shiftHeld()
     return QApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
 }
 
+// Keep a constrained point inside the page by shortening the vector from the
+// start point, rather than clipping x and y independently (which would change
+// a 45-degree or axis-snapped direction).
+QPointF constrainPointToPage(const QPointF &start, const QPointF &end, const QSizeF &pageSize)
+{
+    const QPointF delta = end - start;
+    if (qFuzzyIsNull(delta.x()) && qFuzzyIsNull(delta.y()))
+        return start;
+    qreal t = 1.0;
+    if (delta.x() > 0.0)
+        t = qMin(t, (pageSize.width() - start.x()) / delta.x());
+    else if (delta.x() < 0.0)
+        t = qMin(t, (0.0 - start.x()) / delta.x());
+    if (delta.y() > 0.0)
+        t = qMin(t, (pageSize.height() - start.y()) / delta.y());
+    else if (delta.y() < 0.0)
+        t = qMin(t, (0.0 - start.y()) / delta.y());
+    return start + delta * qBound(0.0, t, 1.0);
+}
+
 bool pointBefore(const QPointF &a, const QPointF &b)
 {
     if (a.y() < b.y() - 0.5)
@@ -223,7 +243,10 @@ void PdfView::setTool(Tool tool)
     m_eraseIds.clear();
     m_erasePreviewIds.clear();
     m_eraseRemoved.clear();
-    m_wheelAccum = 0;
+    m_wheelAngleAccum = 0;
+    m_wheelPixelAccum = 0.0;
+    m_wheelLastDirection = 0;
+    m_wheelCooldown.invalidate();
     m_textHitValid = false;
     applyToolPreset(tool);
 
@@ -446,6 +469,10 @@ void PdfView::setLayoutMode(PageLayoutMode mode)
     QPointF anchorPoint = m_layout.pageToContent(anchorPage).inverted().map(viewToContent(viewAnchor));
     m_layout.setLayoutMode(mode);
     m_layout.setCurrentPage(anchorPage);
+    m_wheelAngleAccum = 0;
+    m_wheelPixelAccum = 0.0;
+    m_wheelLastDirection = 0;
+    m_wheelCooldown.invalidate();
     if (m_zoomMode == ZoomMode::FitWidth || m_zoomMode == ZoomMode::FitPage)
         applyFitZoom();
     else {
@@ -502,6 +529,10 @@ bool PdfView::wheelTurnsPage() const
 void PdfView::setWheelTurnsPage(bool enabled)
 {
     m_wheelTurnsPage = enabled;
+    m_wheelAngleAccum = 0;
+    m_wheelPixelAccum = 0.0;
+    m_wheelLastDirection = 0;
+    m_wheelCooldown.invalidate();
 }
 
 void PdfView::setZoomMode(ZoomMode mode)
@@ -621,24 +652,26 @@ void PdfView::navigatePageStep(int direction, bool history)
         return;
     const NavigationReason reason = history ? NavigationReason::PageInput
                                              : NavigationReason::Internal;
-    if (m_layout.isContinuous()) {
-        const qreal step = viewport()->height() * 0.9;
-        verticalScrollBar()->setValue(qRound(verticalScrollBar()->value()
-                                             + (direction > 0 ? step : -step)));
-        return;
-    }
     const int current = qBound(0, m_currentPage, m_pageSizes.size() - 1);
+    const QVector<int> spread = m_layout.spreadPages(current);
     if (direction > 0) {
-        const QVector<int> spread = m_layout.spreadPages(current);
         const int next = (spread.isEmpty() ? current : spread.last()) + 1;
         if (next < m_pageSizes.size())
             navigateTo(next, QPointF(), NavigationAlignment::PageTop, reason);
     } else {
-        const QVector<int> spread = m_layout.spreadPages(current);
         const int previous = (spread.isEmpty() ? current : spread.first()) - 1;
         if (previous >= 0)
-            navigateTo(previous, QPointF(), NavigationAlignment::PageBottom, reason);
+            navigateTo(previous, QPointF(), NavigationAlignment::PageTop, reason);
     }
+}
+
+void PdfView::scrollPageViewport(int direction)
+{
+    if (!hasDocument() || direction == 0)
+        return;
+    const qreal step = viewport()->height() * 0.9;
+    verticalScrollBar()->setValue(qRound(verticalScrollBar()->value()
+                                         + (direction > 0 ? step : -step)));
 }
 
 void PdfView::revealPageRegion(int pageIndex, const QRectF &pageBounds)
@@ -1356,6 +1389,8 @@ void PdfView::wheelEvent(QWheelEvent *event)
                 rebuildLayoutAndKeepAnchor(target, m_layout.rotation(), event->position());
                 emit zoomChanged(m_layout.zoom());
             }
+            m_wheelAngleAccum = 0;
+            m_wheelPixelAccum = 0.0;
             event->accept();
             return;
         }
@@ -1363,45 +1398,89 @@ void PdfView::wheelEvent(QWheelEvent *event)
     if ((event->modifiers() & Qt::ShiftModifier) && event->angleDelta().y() != 0) {
         horizontalScrollBar()->setValue(horizontalScrollBar()->value()
                                        - event->angleDelta().y());
+        m_wheelAngleAccum = 0;
+        m_wheelPixelAccum = 0.0;
         event->accept();
         return;
     }
-    const int wheelDelta = event->angleDelta().y() != 0 ? event->angleDelta().y()
-                                                        : event->pixelDelta().y();
-    if (m_wheelTurnsPage && !m_layout.isContinuous() && wheelDelta != 0) {
-        QScrollBar *bar = verticalScrollBar();
-        const bool down = wheelDelta < 0;
-        const bool atBoundary = down ? bar->value() >= bar->maximum()
-                                     : bar->value() <= bar->minimum();
-        const bool hasScrollRoom = bar->maximum() > bar->minimum();
-        if (atBoundary) {
-            m_wheelAccum += wheelDelta;
-            if ((!hasScrollRoom || std::abs(m_wheelAccum) >= 120)
-                && !m_wheelCooldown.isValid()) {
-                const int before = m_currentPage;
-                navigatePageStep(down ? 1 : -1, false);
-                m_wheelAccum = 0;
-                if (m_currentPage != before) {
-                    m_wheelCooldown.start();
-                    event->accept();
-                    return;
-                }
-            }
-            if (!hasScrollRoom) {
-                event->accept();
-                return;
-            }
-        } else {
-            m_wheelAccum = 0;
+
+    const int angleDelta = event->angleDelta().y();
+    const int pixelDelta = event->pixelDelta().y();
+    const bool usePixels = angleDelta == 0 && pixelDelta != 0;
+    const int rawDelta = usePixels ? pixelDelta : angleDelta;
+    const int direction = rawDelta < 0 ? 1 : (rawDelta > 0 ? -1 : 0);
+
+    if (event->phase() == Qt::ScrollEnd) {
+        m_wheelAngleAccum = 0;
+        m_wheelPixelAccum = 0.0;
+        m_wheelLastDirection = 0;
+    }
+
+    if (!m_wheelTurnsPage || m_layout.isContinuous() || direction == 0) {
+        QAbstractScrollArea::wheelEvent(event);
+        return;
+    }
+
+    QScrollBar *bar = verticalScrollBar();
+    const bool down = direction > 0;
+    const bool atBoundary = down ? bar->value() >= bar->maximum()
+                                 : bar->value() <= bar->minimum();
+    const bool hasScrollRoom = bar->maximum() > bar->minimum();
+
+    if (!atBoundary) {
+        m_wheelAngleAccum = 0;
+        m_wheelPixelAccum = 0.0;
+        m_wheelLastDirection = direction;
+        QAbstractScrollArea::wheelEvent(event);
+        return;
+    }
+
+    // A direction change is a deliberate reverse gesture: do not let the
+    // previous page turn's cooldown swallow it.
+    if (m_wheelLastDirection != 0 && m_wheelLastDirection != direction) {
+        m_wheelAngleAccum = 0;
+        m_wheelPixelAccum = 0.0;
+        m_wheelCooldown.invalidate();
+    }
+    m_wheelLastDirection = direction;
+
+    const bool cooldownReady = !m_wheelCooldown.isValid()
+                               || m_wheelCooldown.elapsed() >= 250;
+    if (!cooldownReady) {
+        event->accept();
+        return;
+    }
+
+    if (usePixels)
+        m_wheelPixelAccum += qAbs(pixelDelta);
+    else
+        m_wheelAngleAccum += std::abs(angleDelta);
+
+    const qreal pixelThreshold = 80.0;
+    const int angleThreshold = 120;
+    const bool thresholdReached = usePixels ? m_wheelPixelAccum >= pixelThreshold
+                                            : m_wheelAngleAccum >= angleThreshold;
+    if (!hasScrollRoom || thresholdReached) {
+        const int before = m_currentPage;
+        navigatePageStep(down ? 1 : -1, false);
+        m_wheelAngleAccum = 0;
+        m_wheelPixelAccum = 0.0;
+        if (m_currentPage != before) {
+            m_wheelCooldown.start();
+            event->accept();
+            return;
         }
     }
-    QAbstractScrollArea::wheelEvent(event);
+    event->accept();
 }
 
 void PdfView::keyPressEvent(QKeyEvent *event)
 {
-    if ((event->key() == Qt::Key_Shift) && m_draft.pageIndex >= 0
-        && m_dragMode == DragMode::DrawShape) {
+    if (event->isAutoRepeat() && event->key() == Qt::Key_Shift)
+        return;
+    if (event->key() == Qt::Key_Shift && m_draft.pageIndex >= 0
+        && (m_dragMode == DragMode::DrawShape || m_dragMode == DragMode::DrawPath)) {
+        m_drawShift = true;
         updateDraw(m_draft.pageIndex, m_dragCurrentPage);
         event->accept();
         return;
@@ -1409,7 +1488,10 @@ void PdfView::keyPressEvent(QKeyEvent *event)
 
     if ((event->key() == Qt::Key_PageDown || event->key() == Qt::Key_PageUp)
         && event->modifiers() == Qt::NoModifier) {
-        navigatePageStep(event->key() == Qt::Key_PageDown ? 1 : -1, false);
+        if (m_layout.isContinuous())
+            scrollPageViewport(event->key() == Qt::Key_PageDown ? 1 : -1);
+        else
+            navigatePageStep(event->key() == Qt::Key_PageDown ? 1 : -1, false);
         event->accept();
         return;
     }
@@ -1453,8 +1535,11 @@ void PdfView::keyPressEvent(QKeyEvent *event)
 
 void PdfView::keyReleaseEvent(QKeyEvent *event)
 {
+    if (event->isAutoRepeat() && event->key() == Qt::Key_Shift)
+        return;
     if (event->key() == Qt::Key_Shift && m_draft.pageIndex >= 0
-        && m_dragMode == DragMode::DrawShape) {
+        && (m_dragMode == DragMode::DrawShape || m_dragMode == DragMode::DrawPath)) {
+        m_drawShift = false;
         updateDraw(m_draft.pageIndex, m_dragCurrentPage);
         event->accept();
         return;
@@ -1582,6 +1667,7 @@ void PdfView::mousePressEvent(QMouseEvent *event)
         return;
     }
 
+    m_drawShift = event->modifiers().testFlag(Qt::ShiftModifier);
     beginDraw(pageIndex, pagePoint);
 }
 
@@ -1605,6 +1691,8 @@ void PdfView::mouseMoveEvent(QMouseEvent *event)
         return;
     }
 
+    if (m_dragMode == DragMode::DrawShape || m_dragMode == DragMode::DrawPath)
+        m_drawShift = event->modifiers().testFlag(Qt::ShiftModifier);
     switch (m_dragMode) {
     case DragMode::Erase:
         eraseSegment(m_eraseLastView.isNull() ? viewPos : m_eraseLastView, viewPos);
@@ -1679,6 +1767,7 @@ void PdfView::mouseReleaseEvent(QMouseEvent *event)
         return;
     }
 
+    m_drawShift = event->modifiers().testFlag(Qt::ShiftModifier);
     switch (m_dragMode) {
     case DragMode::Erase: {
         const QPointF releasePos = event->position();
@@ -2103,28 +2192,29 @@ void PdfView::clearTemporarySelections()
 
 bool PdfView::handleEscape()
 {
-    const bool hadInteraction = m_dragMode != DragMode::None || hasTextSelection()
-        || hasRegionSelection() || !m_selectedId.isEmpty() || m_tool != Tool::Select;
-    if (!hadInteraction)
-        return false;
-
-    m_dragMode = DragMode::None;
-    m_draft = Annotation();
-    m_editId.clear();
-    m_resizeHandle = -1;
-    m_dragPage = -1;
-    m_textSelecting = false;
-    m_eraseIds.clear();
-    m_erasePreviewIds.clear();
-    m_eraseRemoved.clear();
-    m_eraseProtectedHinted = false;
-    m_eraseLastView = QPointF();
-    clearTemporarySelections();
-    selectAnnotation(QString());
-    if (m_tool != Tool::Select)
+    if (m_dragMode == DragMode::Erase) {
+        cancelErase();
+        return true;
+    }
+    if (m_dragMode != DragMode::None || m_draft.pageIndex >= 0) {
+        m_dragMode = DragMode::None;
+        m_draft = Annotation();
+        m_editId.clear();
+        m_resizeHandle = -1;
+        m_dragPage = -1;
+        m_textSelecting = false;
+        viewport()->update();
+        return true;
+    }
+    if (hasTextSelection() || hasRegionSelection()) {
+        clearTemporarySelections();
+        return true;
+    }
+    if (m_tool != Tool::Select) {
         setTool(Tool::Select);
-    viewport()->update();
-    return true;
+        return true;
+    }
+    return false;
 }
 
 QString PdfView::annotationClipboardJson() const
@@ -2352,15 +2442,18 @@ void PdfView::updateDraw(int pageIndex, const QPointF &pagePoint)
     m_dragCurrentPage = point;
 
     switch (m_draft.type) {
-    case AnnotationType::Line:
+    case AnnotationType::Line: {
         m_draft.p1 = m_dragStartPage;
-        m_draft.p2 = shiftHeld() ? snapToAxis(m_dragStartPage, point) : point;
+        QPointF end = m_drawShift ? snapToAxis(m_dragStartPage, point) : point;
+        end = constrainPointToPage(m_dragStartPage, end, m_pageSizes.value(pageIndex));
+        m_draft.p2 = end;
         m_draft.rect = QRectF(m_draft.p1, m_draft.p2).normalized();
         break;
+    }
     case AnnotationType::Rectangle:
     case AnnotationType::Ellipse: {
         QPointF end = point;
-        if (shiftHeld()) {
+        if (m_drawShift) {
             const QSizeF pageSize = m_pageSizes.value(pageIndex);
             qreal dx = point.x() - m_dragStartPage.x();
             qreal dy = point.y() - m_dragStartPage.y();
@@ -2388,10 +2481,11 @@ void PdfView::updateDraw(int pageIndex, const QPointF &pagePoint)
             && QLineF(m_drawRawPath.last(), point).length() >= 0.4)
             m_drawRawPath.append(point);
         m_draft.path = m_drawRawPath;
-        if (shiftHeld() && m_drawRawPath.size() >= 1) {
-            const QPointF snapped = snapToAxis(m_drawRawPath.first(), point);
-            if (QLineF(m_drawRawPath.last(), snapped).length() >= 0.4)
-                m_draft.path.append(snapped);
+        if (m_drawShift && !m_drawRawPath.isEmpty()) {
+            QPointF snapped = snapToAxis(m_drawRawPath.first(), point);
+            snapped = constrainPointToPage(m_drawRawPath.first(), snapped,
+                                           m_pageSizes.value(pageIndex));
+            m_draft.path = QVector<QPointF>{m_drawRawPath.first(), snapped};
         }
         const QRectF bounds = pathBounds(m_draft.path);
         const qreal pad = m_draft.style.strokeWidthPt / 2.0;
@@ -2414,7 +2508,14 @@ void PdfView::finishDraw()
             if (m_drawRawPath.last() != m_dragCurrentPage
                 && QLineF(m_drawRawPath.last(), m_dragCurrentPage).length() >= 0.4)
                 m_drawRawPath.append(m_dragCurrentPage);
-            m_draft.path = m_drawRawPath;
+            if (m_drawShift) {
+                QPointF snapped = snapToAxis(m_drawRawPath.first(), m_dragCurrentPage);
+                snapped = constrainPointToPage(m_drawRawPath.first(), snapped,
+                                               m_pageSizes.value(m_draft.pageIndex));
+                m_draft.path = QVector<QPointF>{m_drawRawPath.first(), snapped};
+            } else {
+                m_draft.path = m_drawRawPath;
+            }
             const QRectF bounds = pathBounds(m_draft.path);
             const qreal pad = m_draft.style.strokeWidthPt / 2.0;
             m_draft.rect = bounds.adjusted(-pad, -pad, pad, pad);

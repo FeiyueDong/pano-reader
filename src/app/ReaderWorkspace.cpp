@@ -12,6 +12,8 @@
 #include <QDateTime>
 #include <QDir>
 #include <QDoubleSpinBox>
+#include <QEvent>
+#include <QLayout>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -172,12 +174,6 @@ ReaderWorkspace::ReaderWorkspace(DocumentSession *session, QWidget *parent)
 
     buildUi();
     buildFloatingToolBars();
-    auto *escapeShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), this);
-    escapeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(escapeShortcut, &QShortcut::activated, this, [this] {
-        if (!closeTransientUi())
-            m_view->setTool(PdfView::Tool::Select);
-    });
     if (ToolPresets *presets = m_session ? m_session->toolPresets() : nullptr) {
         m_view->setEraserRadius(presets->eraserRadius());
         if (m_eraserRadiusSpin)
@@ -185,17 +181,14 @@ ReaderWorkspace::ReaderWorkspace(DocumentSession *session, QWidget *parent)
     }
 
     connect(m_searchModel, &QPdfSearchModel::countChanged, this, [this]() {
-        if (m_searchCount && m_searchModel && !m_searchModel->searchString().isEmpty())
+        if (m_searchCount && m_searchModel && m_searchEdit
+            && !m_searchModel->searchString().isEmpty()
+            && m_searchModel->searchString() == m_searchEdit->text().trimmed())
             m_searchCount->setText(tr("搜索中… %1").arg(m_searchModel->count()));
     });
     connect(m_searchModel, &QPdfSearchModel::statusChanged, this, [this](QPdfSearchModel::Status status) {
-        if (status == QPdfSearchModel::Status::Finished) {
+        if (status == QPdfSearchModel::Status::Finished)
             refreshSearchResults();
-            if (m_searchCount && m_searchModel) {
-                const int count = m_searchModel->count();
-                m_searchCount->setText(count > 0 ? tr("%1 处").arg(count) : tr("无结果"));
-            }
-        }
     });
 
     connect(m_view, &PdfView::pageChanged, this, &ReaderWorkspace::onPageChanged);
@@ -250,6 +243,8 @@ ReaderWorkspace::ReaderWorkspace(DocumentSession *session, QWidget *parent)
 
     connect(m_thumbRenderer, &PageRenderer::pageReady, this,
             &ReaderWorkspace::onThumbnailRendered);
+    connect(m_thumbRenderer, &PageRenderer::pageFailed, this,
+            &ReaderWorkspace::onThumbnailFailed);
     connect(m_thumbRenderer, &PageRenderer::cacheChanged, this, [this] {
         if (m_thumbRefreshTimer)
             m_thumbRefreshTimer->start();
@@ -845,9 +840,10 @@ QToolBar *ReaderWorkspace::buildContextToolBar()
     opacityLayout->addWidget(m_opacityValue);
     connect(m_opacitySlider, &QSlider::valueChanged, this, [this](int value) {
         m_opacityValue->setText(QStringLiteral("%1%").arg(value));
+        scheduleStyleApply();
     });
     connect(m_opacitySlider, &QSlider::sliderReleased, this,
-            &ReaderWorkspace::applyStyleFromControls);
+            &ReaderWorkspace::flushPendingStyle);
     layout->addWidget(m_opacityWidget);
 
     m_blendWidget = new QWidget(m_contextWidget);
@@ -885,6 +881,7 @@ QToolBar *ReaderWorkspace::buildContextToolBar()
     layout->addStretch(1);
 
     bar->addWidget(m_contextWidget);
+    updateContextBarHeight();
     return bar;
 }
 
@@ -985,8 +982,8 @@ QWidget *ReaderWorkspace::buildLeftDock()
 
     m_thumbnailList = new QListWidget(m_leftTabs);
     m_thumbnailList->setViewMode(QListView::IconMode);
-    m_thumbnailList->setIconSize(QSize(116, 154));
-    m_thumbnailList->setGridSize(QSize(138, 188));
+    m_thumbnailList->setIconSize(QSize(160, 226));
+    m_thumbnailList->setGridSize(QSize(176, 244));
     m_thumbnailList->setResizeMode(QListView::Adjust);
     m_thumbnailList->setMovement(QListView::Static);
     m_thumbnailList->setSpacing(6);
@@ -1202,6 +1199,8 @@ void ReaderWorkspace::refreshThumbnails()
     m_thumbnailList->clear();
     m_thumbRequests.clear();
     m_thumbGenerated.clear();
+    m_thumbFailed.clear();
+    m_thumbRetries.clear();
     if (!m_view->hasDocument()) {
         m_thumbRenderer->setDocument(nullptr);
         return;
@@ -1213,8 +1212,8 @@ void ReaderWorkspace::refreshThumbnails()
         auto *item = new QListWidgetItem(QStringLiteral("%1").arg(page + 1), m_thumbnailList);
         item->setData(Qt::UserRole, page);
         item->setTextAlignment(Qt::AlignHCenter);
-        item->setSizeHint(QSize(132, 176));
-        QPixmap placeholder(116, 154);
+        item->setSizeHint(QSize(176, 244));
+        QPixmap placeholder(160, 226);
         placeholder.fill(palette.color(QPalette::Base));
         item->setIcon(QIcon(placeholder));
     }
@@ -1223,27 +1222,110 @@ void ReaderWorkspace::refreshThumbnails()
     requestNearbyThumbnails();
 }
 
+QSize ReaderWorkspace::thumbnailRequestSize(int page) const
+{
+    const QSizeF pageSize = m_view->layout().pageSizePt(page);
+    if (pageSize.isEmpty())
+        return QSize(160, 220);
+    qreal width = 360.0;
+    qreal height = width * pageSize.height() / pageSize.width();
+    if (height > 510.0) {
+        height = 510.0;
+        width = height * pageSize.width() / pageSize.height();
+    }
+    return QSize(qMax(48, qRound(width)), qMax(48, qRound(height)));
+}
+
+void ReaderWorkspace::showThumbnail(int page, const QImage &image)
+{
+    if (!m_thumbnailList || page < 0 || page >= m_thumbnailList->count() || image.isNull())
+        return;
+    m_thumbGenerated.insert(page);
+    m_thumbFailed.remove(page);
+    QImage oriented = image;
+    if (m_view->rotation() != 0) {
+        QTransform transform;
+        transform.rotate(m_view->rotation());
+        oriented = image.transformed(transform, Qt::SmoothTransformation);
+    }
+    // PDF rasterization at thumbnail scale gives thin glyphs very low alpha;
+    // boost the coverage before compositing so sparse pages remain legible.
+    QImage adjusted = oriented.convertToFormat(QImage::Format_ARGB32);
+    for (int y = 0; y < adjusted.height(); ++y) {
+        auto *line = reinterpret_cast<QRgb *>(adjusted.scanLine(y));
+        for (int x = 0; x < adjusted.width(); ++x) {
+            const int alpha = qAlpha(line[x]);
+            if (alpha != 0 && alpha < 255)
+                line[x] = qRgba(qRed(line[x]), qGreen(line[x]), qBlue(line[x]),
+                                qMin(255, alpha * 2));
+        }
+    }
+    QImage flattened(adjusted.size(), QImage::Format_ARGB32_Premultiplied);
+    flattened.fill(Qt::white);
+    {
+        QPainter painter(&flattened);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+        painter.drawImage(0, 0, adjusted);
+    }
+
+    const QPixmap fullPixmap = QPixmap::fromImage(flattened);
+    const QPixmap pixmap = fullPixmap.scaled(
+        QSize(160, 226), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    if (QListWidgetItem *item = m_thumbnailList->item(page)) {
+        item->setIcon(QIcon(pixmap));
+        item->setSizeHint(QSize(176, 244));
+        m_thumbnailList->viewport()->update();
+    }
+}
+
 void ReaderWorkspace::requestNearbyThumbnails()
 {
     if (!m_view->hasDocument() || !m_thumbnailList || !m_leftTabs
         || m_leftTabs->currentWidget() != m_thumbnailList || !m_thumbnailList->isVisible())
         return;
+    const QRect viewportRect = m_thumbnailList->viewport()->rect();
+    QSet<int> pages;
+    int minVisible = m_thumbnailList->count();
+    int maxVisible = -1;
+    for (int row = 0; row < m_thumbnailList->count(); ++row) {
+        const QRect rect = m_thumbnailList->visualItemRect(m_thumbnailList->item(row));
+        if (rect.intersects(viewportRect)) {
+            pages.insert(row);
+            minVisible = qMin(minVisible, row);
+            maxVisible = qMax(maxVisible, row);
+        }
+    }
+    if (minVisible <= maxVisible) {
+        for (int page = qMax(0, minVisible - 2); page <= minVisible - 1; ++page)
+            pages.insert(page);
+        for (int page = maxVisible + 1;
+             page <= qMin(m_thumbnailList->count() - 1, maxVisible + 2); ++page)
+            pages.insert(page);
+    }
     const int current = m_view->currentPage();
-    int first = qMax(0, current - 2);
-    int last = qMin(m_view->pageCount() - 1, current + 3);
-    const QModelIndex topIndex = m_thumbnailList->indexAt(QPoint(2, 2));
-    const QModelIndex bottomIndex = m_thumbnailList->indexAt(
-        QPoint(2, qMax(2, m_thumbnailList->viewport()->height() - 2)));
-    if (topIndex.isValid())
-        first = qMin(first, topIndex.row());
-    if (bottomIndex.isValid())
-        last = qMax(last, bottomIndex.row());
-    for (int page = first; page <= last; ++page) {
-        if (m_thumbGenerated.contains(page) || m_thumbRequests.contains(page))
+    for (int page = qMax(0, current - 1);
+         page <= qMin(m_thumbnailList->count() - 1, current + 1); ++page)
+        pages.insert(page);
+
+    int issued = 0;
+    for (int page : pages) {
+        if (issued >= 32)
+            break;
+        if (page < 0 || page >= m_thumbnailList->count()
+            || m_thumbGenerated.contains(page) || m_thumbFailed.contains(page)
+            || m_thumbRequests.contains(page))
             continue;
-        const quint64 request = m_thumbRenderer->requestPage(page, QSize(160, 220));
-        if (request != 0)
+        const QSize pixelSize = thumbnailRequestSize(page);
+        const QImage cached = m_thumbRenderer->cachedImage(page, pixelSize);
+        if (!cached.isNull()) {
+            showThumbnail(page, cached);
+            continue;
+        }
+        const quint64 request = m_thumbRenderer->requestPage(page, pixelSize);
+            if (request != 0) {
             m_thumbRequests.insert(page, request);
+            ++issued;
+        }
     }
 }
 
@@ -1253,28 +1335,30 @@ void ReaderWorkspace::onThumbnailRendered(int page, const QSize &size, const QIm
     Q_UNUSED(size);
     if (!m_thumbnailList || page < 0 || page >= m_thumbnailList->count())
         return;
-    if (m_thumbRequests.contains(page) && m_thumbRequests.value(page) != requestId)
+    if (!m_thumbRequests.contains(page) || m_thumbRequests.value(page) != requestId)
         return;
     m_thumbRequests.remove(page);
-    m_thumbGenerated.insert(page);
-    QImage oriented = image;
-    if (m_view->rotation() != 0) {
-        QTransform transform;
-        transform.rotate(m_view->rotation());
-        oriented = image.transformed(transform, Qt::SmoothTransformation);
+    showThumbnail(page, image);
+}
+
+void ReaderWorkspace::onThumbnailFailed(int page, const QSize &size, quint64 requestId)
+{
+    Q_UNUSED(size);
+    if (!m_thumbnailList || page < 0 || page >= m_thumbnailList->count())
+        return;
+    if (!m_thumbRequests.contains(page) || m_thumbRequests.value(page) != requestId)
+        return;
+    m_thumbRequests.remove(page);
+    const int retries = m_thumbRetries.value(page, 0);
+    if (retries < 1) {
+        m_thumbRetries.insert(page, retries + 1);
+        const quint64 request = m_thumbRenderer->requestPage(page, thumbnailRequestSize(page));
+        if (request != 0) {
+            m_thumbRequests.insert(page, request);
+            return;
+        }
     }
-    QImage flattened(oriented.size(), QImage::Format_ARGB32_Premultiplied);
-    flattened.fill(Qt::white);
-    {
-        QPainter painter(&flattened);
-        painter.drawImage(0, 0, oriented);
-    }
-    const QPixmap pixmap = QPixmap::fromImage(flattened).scaled(
-        QSize(116, 154), Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    if (QListWidgetItem *item = m_thumbnailList->item(page)) {
-        item->setIcon(QIcon(pixmap));
-        item->setSizeHint(QSize(132, 176));
-    }
+    m_thumbFailed.insert(page);
 }
 
 void ReaderWorkspace::onThumbnailActivated(QListWidgetItem *item)
@@ -1863,6 +1947,40 @@ void ReaderWorkspace::flushPendingStyle()
     m_applyingStyle = false;
 }
 
+void ReaderWorkspace::updateContextBarHeight()
+{
+    if (!m_contextWidget || !m_contextToolBar)
+        return;
+    const QWidget *controls[] = {m_contextHint, m_colorWidget, m_fillWidget,
+                                 m_widthWidget, m_opacityWidget, m_lineStyleWidget,
+                                 m_blendWidget, m_eraserWidget};
+    int contentHeight = 0;
+    for (const QWidget *widget : controls) {
+        if (widget)
+            contentHeight = qMax(contentHeight, widget->sizeHint().height());
+    }
+    int margins = 4;
+    if (QLayout *layout = m_contextWidget->layout()) {
+        const QMargins m = layout->contentsMargins();
+        margins = m.top() + m.bottom();
+    }
+    const int widgetHeight = contentHeight + margins;
+    m_contextWidget->setFixedHeight(widgetHeight);
+    int barExtra = 4;
+    if (QLayout *barLayout = m_contextToolBar->layout()) {
+        const QMargins m = barLayout->contentsMargins();
+        barExtra = m.top() + m.bottom();
+    }
+    m_contextToolBar->setFixedHeight(widgetHeight + barExtra);
+}
+
+void ReaderWorkspace::changeEvent(QEvent *event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange)
+        updateContextBarHeight();
+}
+
 void ReaderWorkspace::updateContextToolBar()
 {
     if (!m_contextToolBar || !m_contextWidget)
@@ -1888,7 +2006,7 @@ void ReaderWorkspace::updateContextToolBar()
         hint = tool == PdfView::Tool::Hand ? tr("拖动画布滚动手感：按住左键移动页面。")
                                            : tr("拖选文字；Ctrl+C 复制。");
     } else if (tool == PdfView::Tool::Eraser) {
-        hint = tr("按住拖动连续擦除；带笔记的对象会先确认。");
+        hint = tr("按住拖动连续擦除；附有笔记的标注将被跳过。");
         eraser = true;
     } else if (tool == PdfView::Tool::Select && !annotation) {
         hint = tr("选择对象后可在此编辑它的颜色、线宽、透明度与填充。");
@@ -2000,7 +2118,9 @@ void ReaderWorkspace::onRotationChanged(int degrees)
 
 void ReaderWorkspace::goToPageFromSpin(int oneBasedPage)
 {
-    m_view->goToPage(oneBasedPage - 1);
+    if (!m_view || !m_view->hasDocument())
+        return;
+    m_view->goToPage(qBound(1, oneBasedPage, qMax(1, m_view->pageCount())) - 1);
 }
 
 void ReaderWorkspace::zoomEdited()
@@ -2025,10 +2145,13 @@ void ReaderWorkspace::updateBottomStatus()
     }
     if (m_pageTotalLabel)
         m_pageTotalLabel->setText(QStringLiteral("/ %1").arg(qMax(1, m_view->pageCount())));
+    const QVector<int> spread = m_view->layout().spreadPages(m_view->currentPage());
+    const int spreadFirst = spread.isEmpty() ? m_view->currentPage() : spread.first();
+    const int spreadLast = spread.isEmpty() ? m_view->currentPage() : spread.last();
     if (m_prevPageButton)
-        m_prevPageButton->setEnabled(m_view->currentPage() > 0);
+        m_prevPageButton->setEnabled(spreadFirst > 0);
     if (m_nextPageButton)
-        m_nextPageButton->setEnabled(m_view->currentPage() + 1 < m_view->pageCount());
+        m_nextPageButton->setEnabled(spreadLast + 1 < m_view->pageCount());
     if (m_zoomCombo) {
         const QSignalBlocker blocker(m_zoomCombo);
         m_zoomCombo->setEditText(QStringLiteral("%1%").arg(qRound(m_view->zoom() * 100.0)));
@@ -2336,6 +2459,8 @@ void ReaderWorkspace::openSearchPanel()
 {
     if (!m_searchBar || !m_leftTabs)
         return;
+    if (m_fullscreen)
+        emit fullscreenRequested();
     const int searchIndex = m_leftTabs->indexOf(m_searchBar);
     if (searchIndex < 0)
         return;
@@ -2413,7 +2538,7 @@ void ReaderWorkspace::refreshSearchResults()
             m_searchCount->setText(count > 0 ? tr("%1 处").arg(count) : tr("无结果"));
     }
     if (count == 0 && m_view)
-        showStatus(tr("没有匹配文本；扫描版 PDF 可能没有可搜索文字层"));
+        showStatus(tr("没有匹配文本，可能没有可搜索文字层"));
     m_searchHighlightRects = highlights;
     if (m_searchResults->count() > 0 && m_searchResults->currentRow() < 0)
         m_searchResults->setCurrentRow(0);
@@ -2694,7 +2819,6 @@ void ReaderWorkspace::setFullscreenMode(bool fullscreen)
         m_fullscreenRightVisible = m_rightDock && m_rightDock->isVisible();
         m_primaryToolBar->hide();
         m_contextToolBar->hide();
-        m_searchBar->hide();
         if (m_leftDock)
             m_leftDock->hide();
         if (m_rightDock)
@@ -2740,10 +2864,10 @@ void ReaderWorkspace::updateThumbnailLayout()
 {
     if (!m_thumbnailList)
         return;
-    const int available = qMax(138, m_thumbnailList->viewport()->width() - 12);
-    const int columns = qMax(1, available / 138);
+    const int available = qMax(176, m_thumbnailList->viewport()->width() - 12);
+    const int columns = qMax(1, available / 176);
     const int cellWidth = columns == 1 ? available : available / columns;
-    m_thumbnailList->setGridSize(QSize(cellWidth, 188));
+    m_thumbnailList->setGridSize(QSize(cellWidth, 244));
 }
 
 void ReaderWorkspace::positionFullscreenExit()
@@ -2762,14 +2886,6 @@ bool ReaderWorkspace::closeTransientUi()
 {
     if (!m_view)
         return false;
-    if (m_view->tool() != PdfView::Tool::Select) {
-        m_view->setTool(PdfView::Tool::Select);
-        return true;
-    }
-    if (m_view->hasTextSelection() || m_view->hasRegionSelection()) {
-        m_view->clearTemporarySelections();
-        return true;
-    }
     if (m_view->handleEscape())
         return true;
     if (m_searchBar && m_searchBar->isVisible()) {

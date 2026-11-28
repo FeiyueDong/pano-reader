@@ -47,6 +47,7 @@ public:
 
 public:
     void resizeEvent(QResizeEvent *event) override;
+    void changeEvent(QEvent *event) override;
 
     PdfView *view() const { return m_view; }
     NotePanel *notePanel() const { return m_notePanel; }
@@ -93,6 +94,7 @@ private slots:
     void refreshThumbnails();
     void requestNearbyThumbnails();
     void onThumbnailRendered(int page, const QSize &size, const QImage &image, quint64 requestId);
+    void onThumbnailFailed(int page, const QSize &size, quint64 requestId);
     void onThumbnailActivated(QListWidgetItem *item);
     void onOutlineActivated(const QModelIndex &index);
     void onPageChanged(int page);
@@ -147,6 +149,8 @@ private:
     void refreshAnnotationList();
     void refreshAnnotationPreview();
     void updateThumbnailLayout();
+    QSize thumbnailRequestSize(int page) const;
+    void showThumbnail(int page, const QImage &image);
     QListWidgetItem *makeAnnotationItem(const Annotation &annotation) const;
     const Annotation *currentAnnotation() const;
     AnnotationStyle styleFromControls() const;
@@ -156,6 +160,7 @@ private:
     QString presetIdFor(PdfView::Tool tool) const;
     void updateToolActions();
     void updateContextToolBar();
+    void updateContextBarHeight();
     QString noteTitleFor(const Annotation &annotation) const;
     void markNoteDirty();
     void stopNoteTimers();
@@ -187,6 +192,8 @@ private:
     QTimer *m_thumbRefreshTimer = nullptr;
     QHash<int, quint64> m_thumbRequests;
     QSet<int> m_thumbGenerated;
+    QSet<int> m_thumbFailed;
+    QHash<int, int> m_thumbRetries;
     QListWidget *m_annotationList = nullptr;
     QListWidget *m_bookmarkList = nullptr;
     QPushButton *m_bookmarkAddButton = nullptr;
