@@ -42,6 +42,23 @@ QString PageRenderer::cacheKey(int pageIndex, const QSize &pixelSize)
     return QStringLiteral("%1/%2x%3").arg(pageIndex).arg(pixelSize.width()).arg(pixelSize.height());
 }
 
+QImage PageRenderer::cachedImageAnySize(int pageIndex) const
+{
+    const QString prefix = QString::number(pageIndex) + QLatin1Char('/');
+    QImage best;
+    qint64 bestArea = 0;
+    for (auto it = m_cache.cbegin(); it != m_cache.cend(); ++it) {
+        if (!it.key().startsWith(prefix))
+            continue;
+        const qint64 area = qint64(it.value().width()) * it.value().height();
+        if (area > bestArea) {
+            best = it.value();
+            bestArea = area;
+        }
+    }
+    return best;
+}
+
 bool PageRenderer::hasCachedImage(int pageIndex, const QSize &pixelSize) const
 {
     return m_cache.contains(cacheKey(pageIndex, pixelSize));

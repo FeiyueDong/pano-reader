@@ -27,7 +27,7 @@ struct AppSettings {
     bool readerLeftVisible = true;
     bool readerRightVisible = true;
     int readerLeftWidth = 240;
-    int readerRightWidth = 340;
+    int readerRightWidth = 380;
     QString defaultLayoutMode = QStringLiteral("continuous_single");
     ZoomMode defaultZoomMode = ZoomMode::FitPage;
     bool firstPageAlone = true;

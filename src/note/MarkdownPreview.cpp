@@ -5,6 +5,7 @@
 #include <QEvent>
 #include <QPalette>
 #include <QScrollBar>
+#include <QTextCursor>
 #include <QTextDocument>
 
 namespace pano {
@@ -14,8 +15,8 @@ MarkdownPreview::MarkdownPreview(QWidget *parent)
 {
     setReadOnly(true);
     setFrameShape(QFrame::NoFrame);
-    setOpenExternalLinks(true);
-    setOpenLinks(true);
+    setOpenExternalLinks(false);
+    setOpenLinks(false);
     setContextMenuPolicy(Qt::DefaultContextMenu);
 
     document()->setDocumentMargin(4);
@@ -48,7 +49,8 @@ void MarkdownPreview::applyDocumentStyle()
         "th, td { border: 1px solid %7; padding: 3px 6px; }"
         "th { background-color: %9; }"
         "hr { border: none; border-top: 1px solid %7; }"
-        "a { color: #2f6fed; }")
+        "a { color: %10; }"
+        ".math-error, .asset-missing { color: #c0392b; }")
                                      .arg(QString::number(base * 1.8, 'f', 1))
                                      .arg(QString::number(base * 1.55, 'f', 1))
                                      .arg(QString::number(base * 1.35, 'f', 1))
@@ -57,7 +59,8 @@ void MarkdownPreview::applyDocumentStyle()
                                      .arg(text)
                                      .arg(border)
                                      .arg(muted)
-                                     .arg(headingBackground));
+                                     .arg(headingBackground)
+                                     .arg(pal.color(QPalette::Link).name()));
 }
 
 void MarkdownPreview::changeEvent(QEvent *event)
@@ -74,7 +77,9 @@ void MarkdownPreview::setNoteMarkdown(const QString &markdown, const QString &ba
 {
     m_baseDirectory = baseDirectory;
     m_lastMarkdown = markdown;
-    const MarkdownRenderResult rendered = MarkdownRenderer::render(markdown, baseDirectory);
+    const qreal base = font().pointSizeF() > 0.0 ? font().pointSizeF() : 11.0;
+    const MarkdownRenderResult rendered =
+        MarkdownRenderer::render(markdown, baseDirectory, base, palette().color(QPalette::Text));
 
     document()->clear();
     for (auto it = rendered.resources.cbegin(); it != rendered.resources.cend(); ++it)
@@ -87,6 +92,34 @@ void MarkdownPreview::setNoteMarkdown(const QString &markdown, const QString &ba
         setHtml(rendered.html);
 
     verticalScrollBar()->setValue(0);
+    applySearchHighlight();
+}
+
+void MarkdownPreview::setSearchQuery(const QString &query)
+{
+    m_searchQuery = query;
+    applySearchHighlight();
+}
+
+void MarkdownPreview::applySearchHighlight()
+{
+    QList<QTextEdit::ExtraSelection> selections;
+    if (!m_searchQuery.isEmpty()) {
+        const QColor background = palette().color(QPalette::Highlight);
+        const QColor foreground = palette().color(QPalette::HighlightedText);
+        QTextCursor cursor(document());
+        while (true) {
+            cursor = document()->find(m_searchQuery, cursor);
+            if (cursor.isNull())
+                break;
+            QTextEdit::ExtraSelection selection;
+            selection.cursor = cursor;
+            selection.format.setBackground(background);
+            selection.format.setForeground(foreground);
+            selections.append(selection);
+        }
+    }
+    setExtraSelections(selections);
 }
 
 } // namespace pano

@@ -25,6 +25,9 @@ public:
 
     // A cache hit updates LRU order, because this is the normal paint path.
     QImage cachedImage(int pageIndex, const QSize &pixelSize);
+    // Best available raster for a page, used as a temporary preview while the
+    // exact zoom-level raster is still being produced.
+    QImage cachedImageAnySize(int pageIndex) const;
     bool hasCachedImage(int pageIndex, const QSize &pixelSize) const;
 
     // Returns the request id, or 0 if the request could not be issued.

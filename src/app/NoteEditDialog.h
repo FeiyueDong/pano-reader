@@ -4,16 +4,21 @@
 
 #include "note/Note.h"
 
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
+class QSplitter;
+class QSyntaxHighlighter;
+class QTimer;
 
 namespace pano {
 
 class DocumentSession;
+class MarkdownPreview;
 
-// Non-modal editor for one note.  The dialog is bound to a book/note target,
+// Non-modal editor for one note. The dialog is bound to a book/note target,
 // not to the reader selection, so changing the current PDF selection cannot
 // redirect a save.
 class NoteEditDialog : public QDialog
@@ -33,6 +38,8 @@ public:
 signals:
     void saved(const QString &noteId);
     void closed();
+    void imageRequested();
+    void captureRequested();
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -41,6 +48,11 @@ private:
     void updateHeader();
     bool saveInternal(bool closeAfter, QString *errorMessage = nullptr);
     void requestClose();
+    void schedulePreview();
+    void refreshPreview();
+    void regenerateMarkdown();
+    void applyMode(int mode);
+    void insertImageData(const QImage &image);
 
     DocumentSession *m_session = nullptr;
     Note m_note;
@@ -55,6 +67,14 @@ private:
     QPlainTextEdit *m_editor = nullptr;
     QPushButton *m_saveButton = nullptr;
     QPushButton *m_okButton = nullptr;
+    QLabel *m_renderStatus = nullptr;
+    QLineEdit *m_searchEdit = nullptr;
+    MarkdownPreview *m_preview = nullptr;
+    QSplitter *m_splitter = nullptr;
+    QComboBox *m_modeCombo = nullptr;
+    QPushButton *m_locateButton = nullptr;
+    QSyntaxHighlighter *m_highlighter = nullptr;
+    QTimer *m_previewTimer = nullptr;
 };
 
 } // namespace pano

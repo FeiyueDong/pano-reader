@@ -3,16 +3,16 @@
 PANO 是一款本地优先的 PDF 阅读与标注工作区。它把 PDF 视为只读源文件，在独立的书库
 目录中保存标注、阅读状态和 Markdown 笔记；不依赖账号、云端或网络。
 
-当前版本是 Phase 3.1 独立笔记模型与笔记树版本。在 Phase 2.2 阅读器基础上，笔记从
-标注内嵌字段拆分为独立 `Note` 模型和 `NoteTree`，标注与笔记保持可选的一对一关联；
-新增笔记树、独立笔记编辑器和 `annotations.json` schema 2。旧的 schema 1 数据会被明确
-拒绝，不做自动迁移。
+当前版本是 Phase 3.2 专业笔记编辑器与工程组织版本。正式程序采用模块化静态库构建；
+笔记编辑器使用 MD4C + JKQTMathText 渲染 Markdown/公式，提供两栏预览、格式工具栏、
+查找、字号持久化和笔记/树导出；阅读器继续使用独立 `Note` 模型、`NoteTree` 和
+`annotations.json` schema 2。旧的 schema 1 数据会被明确拒绝，不做自动迁移。
 Phase 0 的 PDF Demo 和 Phase 3.0 Markdown Demo 归档在 [`demo/`](demo/)，由根工程
 选项按需构建，默认不参与正式构建。
 
-![笔记树](docs/development/log/phase3.1-note-tree.png)
+![笔记树](docs/development/log/phase3.2-note-tree.png)
 
-![笔记编辑器](docs/development/log/phase3.1-note-editor.png)
+![笔记编辑器](docs/development/log/phase3.2-note-editor.png)
 
 ![阅读器](docs/development/log/phase2.2-layout.png)
 
@@ -42,9 +42,11 @@ Phase 0 的 PDF Demo 和 Phase 3.0 Markdown Demo 归档在 [`demo/`](demo/)，�
   或多级笔记树中，也可与一个标注建立可选的一对一关联。右侧笔记页提供新建笔记/分组、
   重命名、移动、排序、删除、关联/解除关联和精确定位；独立非模态编辑器绑定
   `book_id + note_id`，支持保存继续、确定关闭、取消和关闭前保存提示。
-- 笔记内容：支持 Markdown、图片、区域截图和本地公式渲染；笔记草稿在保存成功前不写入
-  书库，保存失败保留草稿。选择对象可复制/粘贴/复制一份，使用自定义 MIME 保留完整样式，
-  但不会复制笔记或关联。
+- 笔记内容：使用 MD4C（CommonMark/GFM）和 JKQTMathText 离线渲染 Markdown、表格、
+  删除线、行内/显示公式、矩阵与分段函数；图片和区域截图保存在书库 `assets/`。编辑器
+  支持格式工具栏、预览查找、字号持久化、保存继续/确定/取消，草稿在保存成功前不写入
+  书库。笔记树支持按标题/正文过滤，并可将当前笔记导出为 Markdown、按树层级导出全部
+  笔记或导出 JSON；导出时会复制相对图片资源。
 - 工具预设：每个工具独立保存颜色、线宽、线型、描边、填充、透明度和混合模式；新建
   标注不受其他工具或旧标注影响。设置窗口修改按工具暂存，应用/确定才写入。
 - 书库：三栏浏览、封面/列表切换、面包屑、直接子书架书籍、拖拽加入书架/收藏/回收站。
@@ -67,6 +69,8 @@ Phase 0 的 PDF Demo 和 Phase 3.0 Markdown Demo 归档在 [`demo/`](demo/)，�
 - C++20 编译器（在 Arch Linux / GCC 16 上验证）
 - Qt 6.6 或更新的 Qt Widgets、Qt PDF、Qt SVG（图标着色）
 - xmake 3.x
+- MD4C 0.6 与 JKQTMathText（正式程序笔记预览依赖；见
+  [`docs/THIRD_PARTY_NOTICES.md`](docs/THIRD_PARTY_NOTICES.md)）
 - Linux 或 Windows 桌面环境；当前只在 Linux 上实际构建和运行
 
 本项目使用 Qt 6 SDK 的 `QtWidgets` 与 `QtPdf`。系统 Qt 的 PDF 版本不一致时，请显式
@@ -84,6 +88,14 @@ xmake -j4
 ```
 
 默认只构建 `pano-reader` 及其内部静态库；测试探针、性能诊断和两个 Demo 都需要显式开启。
+正式程序现在需要 MD4C 和 JKQTMathText。默认在 `build/deps/jkqt/usr` 查找 JKQT；
+也可用 `JKQT_ROOT=/path/to/jkqt/usr` 指定。首次准备可运行：
+
+```bash
+demo/markdown/tools/fetch-deps.sh
+```
+
+该脚本只准备本地依赖，不参与默认构建；缺少依赖时构建会明确失败。
 
 `--qt` 必须指向包含 `QtWidgets`、`QtPdf` 的 Qt 6 SDK 前缀；如果系统 Qt 的 PDF
 部件版本不一致，自动探测可能选错 SDK，因此建议显式传入。
@@ -100,6 +112,7 @@ xmake -j4
 # 功能回归探针
 xmake f -c -m debug --qt=/path/to/Qt/6.x.y/gcc_64 --build_tests=y --build_tools=n
 xmake -j4
+# 探针源文件位于 tests/
 
 # 性能诊断
 xmake f -c -m debug --qt=/path/to/Qt/6.x.y/gcc_64 --build_tests=n --build_tools=y
@@ -184,7 +197,8 @@ PANO_CONFIG_DIR=/tmp/pano-config QT_QPA_PLATFORM=offscreen \
 探针覆盖数据安全、导入与哈希、书架不变量、标注/笔记持久化、外部修改保护、阅读状态、
 四种旋转与滚动坐标变换、文字选区合并、智能选择与浮动操作、主题与设置取消、四种页面
 布局、缩放模式、搜索/书签/导航、复制粘贴、橡皮连续擦除、滚轮翻页冷却、Shift 两点路径、
-属性栏高度、缩略图缓存与全屏退出；不替代人工 GUI 验收。Phase 3.1 见
+属性栏高度、缩略图缓存与全屏退出；不替代人工 GUI 验收。Phase 3.2 见
+[`phase3.2-results.md`](docs/development/log/phase3.2-results.md)，Phase 3.1 见
 [`phase3.1-results.md`](docs/development/log/phase3.1-results.md)，Phase 2.2 见
 [`phase2.2-results.md`](docs/development/log/phase2.2-results.md)，Phase 2.1 见
 [`phase2.1-results.md`](docs/development/log/phase2.1-results.md)，Phase 2

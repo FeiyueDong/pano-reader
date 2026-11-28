@@ -945,7 +945,13 @@ void PdfView::paintPage(QPainter &painter, int pageIndex, const QRectF &pageView
     painter.fillRect(pageViewRect, Qt::white);
 
     const QSize pixelSize = pagePixelSize(pageIndex);
-    const QImage image = m_renderer.cachedImage(pageIndex, pixelSize);
+    QImage image = m_renderer.cachedImage(pageIndex, pixelSize);
+    bool needsExactImage = image.isNull();
+    if (needsExactImage) {
+        const QImage fallback = m_renderer.cachedImageAnySize(pageIndex);
+        if (!fallback.isNull())
+            image = fallback;
+    }
     if (!image.isNull()) {
         painter.save();
         painter.setClipRect(pageViewRect, Qt::IntersectClip);
@@ -953,6 +959,8 @@ void PdfView::paintPage(QPainter &painter, int pageIndex, const QRectF &pageView
         const QRectF sourcePageRect(QPointF(0.0, 0.0), m_layout.pageSizePt(pageIndex));
         painter.drawImage(sourcePageRect, image);
         painter.restore();
+        if (needsExactImage)
+            ensurePageImage(pageIndex);
     } else {
         ensurePageImage(pageIndex);
         painter.setPen(QColor(QStringLiteral("#9aa1ab")));
@@ -1738,6 +1746,22 @@ void PdfView::mouseMoveEvent(QMouseEvent *event)
             if (page >= 0 && textAtPagePoint(viewToPage(viewPos, page), page))
                 shape = Qt::IBeamCursor;
         }
+        QString tooltip;
+        if (!hit.isEmpty()) {
+            const Annotation *annotation = m_annotations.find(hit);
+            if (annotation) {
+                tooltip = tr("%1 · 拖动可移动，双击编辑笔记")
+                              .arg(annotationTypeDisplayName(annotation->type));
+                if (m_noteQuery && m_noteQuery(hit))
+                    tooltip = tr("%1 · 已关联笔记，双击打开")
+                                  .arg(annotationTypeDisplayName(annotation->type));
+            }
+        } else if (shape == Qt::IBeamCursor) {
+            tooltip = tr("拖动选择文本");
+        } else if (m_tool == Tool::Eraser) {
+            tooltip = tr("按住拖动连续擦除");
+        }
+        viewport()->setToolTip(tooltip);
         viewport()->setCursor(shape);
     }
     QAbstractScrollArea::mouseMoveEvent(event);
@@ -2713,6 +2737,8 @@ void PdfView::contextMenuEvent(QContextMenuEvent *event)
         QAction *copyImage = menu.addAction(tr("复制区域图片"));
         QAction *saveImage = menu.addAction(tr("保存区域图片…"));
         menu.addSeparator();
+        QAction *rectangle = menu.addAction(tr("添加矩形标注"));
+        QAction *highlight = menu.addAction(tr("添加区域高亮"));
         QAction *note = menu.addAction(tr("为区域添加笔记"));
         QAction *chosen = menu.exec(event->globalPos());
         if (!chosen)
@@ -2730,8 +2756,10 @@ void PdfView::contextMenuEvent(QContextMenuEvent *event)
                 if (!image.isNull())
                     image.save(path, "PNG");
             }
-        } else if (chosen == note) {
-            emit noteRequested(QString());
+        } else if (chosen == rectangle || chosen == highlight || chosen == note) {
+            const QString id = createRegionAnnotation(chosen == highlight, m_defaultStyle);
+            if (!id.isEmpty() && chosen == note)
+                emit noteRequested(id);
         }
         return;
     }

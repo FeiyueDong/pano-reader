@@ -2,6 +2,7 @@
 #include <QDir>
 #include <QDialog>
 #include "app/NoteEditDialog.h"
+#include "note/MarkdownRenderer.h"
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -9,6 +10,11 @@
 #include <QJsonObject>
 #include <QTemporaryDir>
 #include <QTreeWidget>
+#include <QComboBox>
+#include <QClipboard>
+#include <QMimeData>
+#include <QPlainTextEdit>
+#include <QImage>
 #include <QTabWidget>
 #include <cstdio>
 
@@ -215,13 +221,83 @@ int main(int argc, char **argv)
     auto *noteDialog = workspace->findChild<pano::NoteEditDialog *>();
     check(noteDialog && noteDialog->isVisible(), "existing note editor opened");
     check(noteDialog && noteDialog->currentNoteId() == linkedId, "editor targets selected note");
-    if (noteDialog)
+    if (noteDialog) {
+        auto *modeCombo = noteDialog->findChild<QComboBox *>(QStringLiteral("noteModeCombo"));
+        auto *editor = noteDialog->findChild<QPlainTextEdit *>();
+        check(modeCombo && editor, "editor mode and source widgets");
+        if (modeCombo && editor) {
+            modeCombo->setCurrentIndex(0);
+            check(editor->isVisible(), "editor-only mode keeps source");
+            modeCombo->setCurrentIndex(2);
+            check(!editor->isVisible(), "preview-only mode hides source");
+            modeCombo->setCurrentIndex(1);
+        }
+        if (editor) {
+            QImage image(40, 24, QImage::Format_ARGB32_Premultiplied);
+            image.fill(QColor(QStringLiteral("#66cc99")));
+            auto *mime = new QMimeData;
+            mime->setImageData(image);
+            QApplication::clipboard()->setMimeData(mime);
+            QMetaObject::invokeMethod(editor, "paste");
+            waitFor(80);
+            check(editor->toPlainText().contains(QStringLiteral("剪贴板图片")),
+                  "clipboard image inserts markdown");
+            check(!QDir(session.bookDirectory() + QStringLiteral("/assets"))
+                       .entryList({QStringLiteral("image-*.png")}, QDir::Files)
+                       .isEmpty(),
+                  "clipboard image saved to book assets");
+        }
         noteDialog->reject();
+    }
     waitFor(100);
     workspace->beginNoteEdit();
     waitFor(200);
     if (QWidget *dialog = workspace->findChild<QDialog *>()) {
         dialog->grab().save(QStringLiteral("build/probe/phase3-note-editor.png"));
+    }
+    {
+        const QString markdown = QStringLiteral(
+            "## 公式\n\n"
+            "$E=mc^2$\n\n"
+            "$$\n\\begin{bmatrix}1&2\\\\3&4\\end{bmatrix}\n$$\n\n"
+            "$$\n\\begin{cases}x=1 & y=2\\\\z=3 & w=4\\end{cases}\n$$");
+        const pano::MarkdownRenderResult rendered =
+            pano::MarkdownRenderer::render(markdown, session.bookDirectory(), 11.0, QColor(Qt::black));
+        check(rendered.mathFailures == 0, "formal MD4C/JKQT renders matrix and cases");
+        check(rendered.formulaCount >= 3, "formal renderer counts inline and display formulas");
+        check(!rendered.resources.isEmpty(), "formal renderer creates math image resources");
+    }
+    // Note export: single Markdown, tree directory and JSON metadata.
+    {
+        const QString exportRoot = QDir(root).filePath(QStringLiteral("exports"));
+        QDir(exportRoot).removeRecursively();
+        QDir().mkpath(exportRoot);
+        QString exportError;
+        const QString singlePath = QDir(exportRoot).filePath(QStringLiteral("single.md"));
+        workspace->exportNoteMarkdown(linkedId, singlePath, &exportError);
+        QFile single(singlePath);
+        check(single.open(QIODevice::ReadOnly), "single note export file");
+        const QString singleText = QString::fromUtf8(single.readAll());
+        check(singleText.contains(QStringLiteral("关联笔记")), "single note export title");
+        check(exportError.isEmpty(), "single note export no error");
+
+        const QString treeDir = QDir(exportRoot).filePath(QStringLiteral("tree"));
+        workspace->exportBookMarkdown(treeDir, &exportError);
+        check(exportError.isEmpty(), "tree export no error");
+        check(QDir(treeDir).exists(), "tree export directory");
+        check(!QDir(treeDir).entryList({QStringLiteral("*.md")}, QDir::Files).isEmpty()
+                  || !QDir(treeDir).entryList(QDir::Dirs | QDir::NoDotAndDotDot).isEmpty(),
+              "tree export contains notes");
+
+        const QString jsonPath = QDir(exportRoot).filePath(QStringLiteral("notes.json"));
+        workspace->exportBookJson(jsonPath, &exportError);
+        QFile jsonFile(jsonPath);
+        check(jsonFile.open(QIODevice::ReadOnly), "json export file");
+        const QJsonDocument doc = QJsonDocument::fromJson(jsonFile.readAll());
+        check(doc.isObject() && doc.object().value(QStringLiteral("format")).toString()
+                  == QStringLiteral("pano-notes-export"),
+              "json export format");
+        check(exportError.isEmpty(), "json export no error");
     }
     workspace->close();
     waitFor(100);

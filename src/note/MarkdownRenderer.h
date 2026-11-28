@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QColor>
 #include <QHash>
 #include <QImage>
 #include <QString>
@@ -13,15 +14,20 @@ struct MarkdownRenderResult
     QString html;
     QHash<QUrl, QImage> resources;
     QStringList warnings;
+    int formulaCount = 0;
+    int mathFailures = 0;
+    int missingImages = 0;
 };
 
-// Converts the note Markdown into Qt rich text. Math is rendered locally by
-// MathRenderer and injected as QTextDocument image resources; local images are
-// injected the same way, so previews never need network access.
+// Converts note Markdown using MD4C (CommonMark + GFM tables/strikethrough and
+// LaTeX math spans). Formulas are rendered locally with JKQTMathText and
+// injected as QTextDocument image resources; only local images are loaded.
 class MarkdownRenderer
 {
 public:
-    static MarkdownRenderResult render(const QString &markdown, const QString &baseDirectory);
+    static MarkdownRenderResult render(const QString &markdown, const QString &baseDirectory,
+                                       qreal fontPt = 11.0,
+                                       const QColor &textColor = QColor(QStringLiteral("#20242b")));
 };
 
 } // namespace pano

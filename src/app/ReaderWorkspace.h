@@ -75,6 +75,9 @@ public:
     void navigateForward();
     void clearNavigationHistory();
     void addBookmarkHere();
+    void exportNoteMarkdown(const QString &noteId, const QString &path, QString *error);
+    void exportBookMarkdown(const QString &directory, QString *error);
+    void exportBookJson(const QString &path, QString *error);
 
 signals:
     void statusMessage(const QString &message);
@@ -176,6 +179,7 @@ private:
     void moveSelectedNoteNode();
     void deleteSelectedNoteNode();
     void showNoteContextMenu(const QPoint &pos);
+    void applyNoteFilter();
     QString selectedNoteNodeId() const;
     QString selectedParentGroupId() const;
     void showStatus(const QString &text);
@@ -186,6 +190,8 @@ private:
     QTreeWidget *m_noteTreeWidget = nullptr;
     MarkdownPreview *m_notePreview = nullptr;
     QLabel *m_noteInfoLabel = nullptr;
+    QLineEdit *m_noteFilterEdit = nullptr;
+    QComboBox *m_noteSortCombo = nullptr;
     QString m_pendingNoteAnnotationId;
     bool m_pendingNoteAnnotationIsNew = false;
     RegionCaptureOverlay *m_captureOverlay = nullptr;
@@ -308,7 +314,7 @@ private:
     QList<int> m_fullscreenSplitterSizes;
     bool m_fullscreenLeftVisible = true;
     bool m_fullscreenRightVisible = true;
-    struct NavPoint { int page = 0; QPointF point; };
+    struct NavPoint { int page = 0; QPointF point; QString label; };
     int m_previousLeftTab = 0;
     QVector<NavPoint> m_history;
     int m_historyIndex = -1;

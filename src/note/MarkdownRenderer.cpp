@@ -1,622 +1,274 @@
 #include "note/MarkdownRenderer.h"
 
-#include "note/MathRenderer.h"
-
 #include <QDir>
-#include <QFileInfo>
 #include <QImageReader>
+#include <QPainter>
 #include <QRegularExpression>
+#include <QTextDocument>
 #include <QUrl>
 
+#include <md4c-html.h>
+
+#include <algorithm>
 #include <cmath>
-#include <utility>
+
+#include <jkqtmathtext/jkqtmathtext.h>
 
 namespace pano {
 namespace {
 
-QString escapeHtml(const QString &text)
+void appendHtml(const MD_CHAR *text, MD_SIZE size, void *data)
+{
+    auto *target = static_cast<QByteArray *>(data);
+    target->append(text, static_cast<int>(size));
+}
+
+QString decodeHtmlEntities(const QString &value)
 {
     QString out;
-    out.reserve(text.size() + 16);
-    for (const QChar ch : text) {
-        switch (ch.unicode()) {
-        case '&': out += QStringLiteral("&amp;"); break;
-        case '<': out += QStringLiteral("&lt;"); break;
-        case '>': out += QStringLiteral("&gt;"); break;
-        case '"': out += QStringLiteral("&quot;"); break;
-        case '\'': out += QStringLiteral("&#39;"); break;
-        default: out += ch; break;
+    out.reserve(value.size());
+    for (int i = 0; i < value.size(); ++i) {
+        if (value.at(i) != QLatin1Char('&')) {
+            out.append(value.at(i));
+            continue;
         }
+        const int semi = value.indexOf(QLatin1Char(';'), i + 1);
+        if (semi < 0 || semi - i > 12) {
+            out.append(value.at(i));
+            continue;
+        }
+        const QString entity = value.mid(i + 1, semi - i - 1);
+        if (entity == QStringLiteral("amp")) out.append(QLatin1Char('&'));
+        else if (entity == QStringLiteral("lt")) out.append(QLatin1Char('<'));
+        else if (entity == QStringLiteral("gt")) out.append(QLatin1Char('>'));
+        else if (entity == QStringLiteral("quot")) out.append(QLatin1Char('"'));
+        else if (entity == QStringLiteral("apos")) out.append(QLatin1Char('\''));
+        else if (entity.startsWith(QLatin1Char('#'))) {
+            bool ok = false;
+            const int code = entity.mid(1).toInt(
+                &ok, entity.startsWith(QStringLiteral("#x")) ? 16 : 10);
+            if (ok && code > 0 && code <= 0x10ffff) {
+                const char32_t ch = static_cast<char32_t>(code);
+                out.append(QString::fromUcs4(&ch, 1));
+            } else {
+                out.append(value.mid(i, semi - i + 1));
+            }
+        } else {
+            out.append(value.mid(i, semi - i + 1));
+        }
+        i = semi;
     }
     return out;
 }
 
-QString attribute(const QString &text)
+struct MathImage
 {
-    return escapeHtml(text);
-}
+    QImage image;
+    QSizeF logicalSize;
+    QString error;
+    bool ok() const { return !image.isNull() && error.isEmpty(); }
+};
 
-bool isEscaped(const QString &text, int index)
+MathImage renderMath(const QString &latex, qreal fontPt, const QColor &color)
 {
-    int backslashes = 0;
-    for (int i = index - 1; i >= 0 && text.at(i) == QLatin1Char('\\'); --i)
-        ++backslashes;
-    return (backslashes % 2) == 1;
-}
-
-bool isHeadingLine(const QString &line)
-{
-    static const QRegularExpression re(QStringLiteral("^ {0,3}#{1,6}\\s+\\S"));
-    return re.match(line).hasMatch();
-}
-
-bool isFenceLine(const QString &line)
-{
-    return line.trimmed().startsWith(QStringLiteral("```"));
-}
-
-bool isHrLine(const QString &line)
-{
-    const QString t = line.trimmed();
-    if (t.size() < 3)
-        return false;
-    const QChar c = t.at(0);
-    if (c != QLatin1Char('-') && c != QLatin1Char('*') && c != QLatin1Char('_'))
-        return false;
-    for (const QChar ch : t) {
-        if (ch != c && ch != QLatin1Char(' '))
-            return false;
-    }
-    return true;
-}
-
-bool isBlockQuoteLine(const QString &line)
-{
-    return line.trimmed().startsWith(QLatin1Char('>'));
-}
-
-bool isBulletLine(const QString &line)
-{
-    static const QRegularExpression re(QStringLiteral("^\\s*[-*+]\\s+\\S"));
-    return re.match(line).hasMatch();
-}
-
-bool isOrderedLine(const QString &line)
-{
-    static const QRegularExpression re(QStringLiteral("^\\s*\\d+[.)]\\s+\\S"));
-    return re.match(line).hasMatch();
-}
-
-bool looksLikeTableStart(const QStringList &lines, int index)
-{
-    if (index + 1 >= lines.size())
-        return false;
-    const QString header = lines.at(index).trimmed();
-    if (!header.contains(QLatin1Char('|')))
-        return false;
-    const QStringList cells = header.split(QLatin1Char('|'));
-    const QString separator = lines.at(index + 1).trimmed();
-    if (!separator.contains(QLatin1Char('|')))
-        return false;
-    const QStringList separators = separator.split(QLatin1Char('|'));
-    int checked = 0;
-    for (const QString &cell : separators) {
-        const QString t = cell.trimmed();
-        if (t.isEmpty())
-            continue;
-        static const QRegularExpression re(QStringLiteral("^:?-{3,}:?$"));
-        if (!re.match(t).hasMatch())
-            return false;
-        ++checked;
-    }
-    return checked > 0 && checked >= qMin(cells.size() - 2, 1);
-}
-
-QStringList splitTableRow(const QString &line)
-{
-    QString t = line.trimmed();
-    if (t.startsWith(QLatin1Char('|')))
-        t.remove(0, 1);
-    if (t.endsWith(QLatin1Char('|')))
-        t.chop(1);
-    QStringList cells = t.split(QLatin1Char('|'));
-    for (QString &cell : cells) {
-        cell = cell.trimmed();
-        cell.replace(QStringLiteral("\\|"), QStringLiteral("|"));
-        cell.replace(QStringLiteral("\\\\"), QStringLiteral("\\"));
-    }
-    return cells;
-}
-
-QString cellAlignment(const QString &separator)
-{
-    const QString t = separator.trimmed();
-    if (t.startsWith(QLatin1Char(':')) && t.endsWith(QLatin1Char(':')))
-        return QStringLiteral("center");
-    if (t.endsWith(QLatin1Char(':')))
-        return QStringLiteral("right");
-    if (t.startsWith(QLatin1Char(':')))
-        return QStringLiteral("left");
-    return QString();
-}
-
-bool isSafeLinkTarget(const QString &target)
-{
-    const QString lower = target.trimmed().toLower();
-    return !lower.startsWith(QStringLiteral("javascript:"))
-        && !lower.startsWith(QStringLiteral("data:"))
-        && !lower.startsWith(QStringLiteral("vbscript:"));
-}
-
-class Renderer
-{
-public:
-    Renderer(QString markdown, QString baseDirectory)
-        : m_markdown(std::move(markdown))
-        , m_baseDirectory(std::move(baseDirectory))
-    {
-    }
-
-    MarkdownRenderResult run()
-    {
-        MarkdownRenderResult result;
-        QString normalized = m_markdown;
-        normalized.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
-        normalized.replace(QLatin1Char('\r'), QLatin1Char('\n'));
-
-        const QStringList lines = normalized.split(QLatin1Char('\n'));
-        QString html;
-        QStringList paragraph;
-        bool paragraphStartsHard = false;
-
-        auto flushParagraph = [&]() {
-            if (paragraph.isEmpty())
-                return;
-            QString joined;
-            for (int i = 0; i < paragraph.size(); ++i) {
-                if (i > 0)
-                    joined += paragraphStartsHard ? QLatin1Char('\n') : QLatin1Char(' ');
-                joined += paragraph.at(i);
-                paragraphStartsHard = paragraph.at(i).endsWith(QStringLiteral("  "));
-            }
-            html += QStringLiteral("<p>") + inlineText(joined) + QStringLiteral("</p>\n");
-            paragraph.clear();
-            paragraphStartsHard = false;
-        };
-
-        int i = 0;
-        while (i < lines.size()) {
-            const QString line = lines.at(i);
-            const QString trimmed = line.trimmed();
-
-            if (trimmed.isEmpty()) {
-                flushParagraph();
-                ++i;
-                continue;
-            }
-
-            if (isFenceLine(line)) {
-                flushParagraph();
-                QString language = trimmed.mid(3).trimmed();
-                QStringList code;
-                ++i;
-                while (i < lines.size() && !isFenceLine(lines.at(i))) {
-                    code.append(lines.at(i));
-                    ++i;
-                }
-                if (i < lines.size())
-                    ++i;
-                const QString codeText = escapeHtml(code.join(QLatin1Char('\n')));
-                if (!language.isEmpty())
-                    html += QStringLiteral("<pre><code class=\"language-%1\">").arg(attribute(language));
-                else
-                    html += QStringLiteral("<pre><code>");
-                html += codeText;
-                html += QStringLiteral("</code></pre>\n");
-                continue;
-            }
-
-            if (trimmed.startsWith(QStringLiteral("$$")) || trimmed.startsWith(QStringLiteral("\\["))) {
-                flushParagraph();
-                const bool bracket = trimmed.startsWith(QStringLiteral("\\["));
-                const QString opening = bracket ? QStringLiteral("\\[") : QStringLiteral("$$");
-                const QString closing = bracket ? QStringLiteral("\\]") : QStringLiteral("$$");
-                QString expression = trimmed.mid(opening.size());
-                ++i;
-                if (expression.contains(closing)) {
-                    expression = expression.left(expression.indexOf(closing));
-                } else {
-                    while (i < lines.size() && !lines.at(i).contains(closing)) {
-                        expression += QLatin1Char('\n');
-                        expression += lines.at(i);
-                        ++i;
-                    }
-                    if (i < lines.size()) {
-                        const QString closingLine = lines.at(i);
-                        expression += QLatin1Char('\n');
-                        expression += closingLine.left(closingLine.indexOf(closing));
-                        ++i;
-                    }
-                }
-                const QString image = mathImage(expression.trimmed(), true, 680);
-                if (!image.isEmpty())
-                    html += QStringLiteral("<p align=\"center\">") + image + QStringLiteral("</p>\n");
-                else
-                    html += QStringLiteral("<p align=\"center\">%1</p>\n")
-                                .arg(escapeHtml(opening + expression + closing));
-                continue;
-            }
-
-            if (isHeadingLine(line)) {
-                flushParagraph();
-                static const QRegularExpression re(QStringLiteral("^ {0,3}(#{1,6})\\s+(.*?)\\s*#*\\s*$"));
-                const QRegularExpressionMatch match = re.match(line);
-                const int level = match.captured(1).size();
-                html += QStringLiteral("<h%1>%2</h%1>\n")
-                            .arg(level)
-                            .arg(inlineText(match.captured(2)));
-                ++i;
-                continue;
-            }
-
-            if (isHrLine(line)) {
-                flushParagraph();
-                html += QStringLiteral("<hr/>\n");
-                ++i;
-                continue;
-            }
-
-            if (isBlockQuoteLine(line)) {
-                flushParagraph();
-                QStringList quoteLines;
-                while (i < lines.size() && isBlockQuoteLine(lines.at(i))) {
-                    QString q = lines.at(i).trimmed();
-                    q.remove(0, 1);
-                    if (q.startsWith(QLatin1Char(' ')))
-                        q.remove(0, 1);
-                    quoteLines.append(q);
-                    ++i;
-                }
-                html += QStringLiteral("<blockquote><p>%1</p></blockquote>\n")
-                            .arg(inlineText(quoteLines.join(QLatin1Char(' '))));
-                continue;
-            }
-
-            if (isBulletLine(line) || isOrderedLine(line)) {
-                flushParagraph();
-                static const QRegularExpression orderedRe(QStringLiteral("^\\s*\\d+[.)]\\s+(.*)$"));
-                static const QRegularExpression bulletRe(QStringLiteral("^\\s*[-*+]\\s+(.*)$"));
-                const bool ordered = isOrderedLine(line);
-                QStringList items;
-                while (i < lines.size()) {
-                    const QString itemLine = lines.at(i);
-                    QRegularExpressionMatch match = ordered ? orderedRe.match(itemLine) : bulletRe.match(itemLine);
-                    if (!match.hasMatch())
-                        break;
-                    QString item = match.captured(1).trimmed();
-                    ++i;
-                    while (i < lines.size() && !lines.at(i).trimmed().isEmpty()
-                           && (lines.at(i).startsWith(QStringLiteral("  "))
-                               || lines.at(i).startsWith(QLatin1Char('\t')))) {
-                        if (!isBulletLine(lines.at(i)) && !isOrderedLine(lines.at(i)))
-                            item += QLatin1Char(' ') + lines.at(i).trimmed();
-                        ++i;
-                    }
-                    items.append(item);
-                }
-                html += ordered ? QStringLiteral("<ol>\n") : QStringLiteral("<ul>\n");
-                for (const QString &item : items)
-                    html += QStringLiteral("<li>%1</li>\n").arg(inlineText(item));
-                html += ordered ? QStringLiteral("</ol>\n") : QStringLiteral("</ul>\n");
-                continue;
-            }
-
-            if (looksLikeTableStart(lines, i)) {
-                flushParagraph();
-                const QStringList headers = splitTableRow(lines.at(i));
-                const QStringList separators = splitTableRow(lines.at(i + 1));
-                QStringList aligns;
-                for (int c = 0; c < headers.size(); ++c)
-                    aligns.append(c < separators.size() ? cellAlignment(separators.at(c)) : QString());
-                i += 2;
-                QStringList rows;
-                while (i < lines.size() && lines.at(i).trimmed().contains(QLatin1Char('|'))
-                       && !lines.at(i).trimmed().isEmpty()) {
-                    rows.append(lines.at(i));
-                    ++i;
-                }
-                html += QStringLiteral("<table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">\n<tr>");
-                for (int c = 0; c < headers.size(); ++c) {
-                    const QString align = aligns.at(c).isEmpty()
-                        ? QString()
-                        : QStringLiteral(" align=\"%1\"").arg(aligns.at(c));
-                    html += QStringLiteral("<th%1>%2</th>").arg(align, inlineText(headers.at(c)));
-                }
-                html += QStringLiteral("</tr>\n");
-                for (const QString &row : rows) {
-                    const QStringList cells = splitTableRow(row);
-                    html += QStringLiteral("<tr>");
-                    for (int c = 0; c < headers.size(); ++c) {
-                        const QString align = aligns.at(c).isEmpty()
-                            ? QString()
-                            : QStringLiteral(" align=\"%1\"").arg(aligns.at(c));
-                        html += QStringLiteral("<td%1>%2</td>")
-                                    .arg(align, inlineText(c < cells.size() ? cells.at(c) : QString()));
-                    }
-                    html += QStringLiteral("</tr>\n");
-                }
-                html += QStringLiteral("</table>\n");
-                continue;
-            }
-
-            if (!paragraph.isEmpty() && isHeadingLine(line))
-                flushParagraph();
-            paragraph.append(trimmed);
-            ++i;
-        }
-        flushParagraph();
-
-        result.html = html;
-        result.resources = m_resources;
-        result.warnings = m_warnings;
+    MathImage result;
+    JKQTMathText math;
+    math.setFontSize(fontPt);
+    math.setFontColor(color);
+    const QString source = QStringLiteral("$") + latex + QStringLiteral("$");
+    math.parse(source, JKQTMathText::LatexParser, JKQTMathText::DefaultParseOptions);
+    const QStringList errors = math.getErrorList();
+    if (!errors.isEmpty()) {
+        result.error = errors.first();
         return result;
     }
 
-private:
-    QString inlineText(const QString &text)
-    {
-        QString out;
-        out.reserve(text.size() + 32);
-        int i = 0;
-        while (i < text.size()) {
-            const QChar ch = text.at(i);
-
-            if (ch == QLatin1Char('\\') && i + 1 < text.size()) {
-                out += escapeHtml(QString(text.at(i + 1)));
-                i += 2;
-                continue;
-            }
-
-            if (ch == QLatin1Char('\n')) {
-                out += QStringLiteral("<br/>");
-                ++i;
-                continue;
-            }
-
-            if (ch == QLatin1Char('`')) {
-                const int end = text.indexOf(QLatin1Char('`'), i + 1);
-                if (end > i + 1) {
-                    out += QStringLiteral("<code>") + escapeHtml(text.mid(i + 1, end - i - 1))
-                        + QStringLiteral("</code>");
-                    i = end + 1;
-                    continue;
-                }
-            }
-
-            if (ch == QLatin1Char('$') && !isEscaped(text, i)) {
-                if (i + 1 < text.size() && text.at(i + 1) == QLatin1Char('$')) {
-                    out += QStringLiteral("$$");
-                    i += 2;
-                    continue;
-                }
-                int end = -1;
-                for (int p = i + 1; p < text.size(); ++p) {
-                    if (text.at(p) == QLatin1Char('$') && !isEscaped(text, p)) {
-                        end = p;
-                        break;
-                    }
-                }
-                if (end > i + 1) {
-                    const QString expression = text.mid(i + 1, end - i - 1).trimmed();
-                    const QString image = mathImage(expression, false, 0);
-                    if (!image.isEmpty()) {
-                        out += image;
-                        i = end + 1;
-                        continue;
-                    }
-                }
-            }
-
-            if (ch == QLatin1Char('!') && i + 1 < text.size() && text.at(i + 1) == QLatin1Char('[')) {
-                const int labelEnd = text.indexOf(QStringLiteral("]("), i + 2);
-                if (labelEnd > i) {
-                    const QString alt = text.mid(i + 2, labelEnd - i - 2);
-                    QString target;
-                    int close = -1;
-                    if (parseTarget(text, labelEnd + 1, &target, &close)) {
-                        out += imageHtml(alt, target);
-                        i = close + 1;
-                        continue;
-                    }
-                }
-            }
-
-            if (ch == QLatin1Char('[') && !isEscaped(text, i)) {
-                const int labelEnd = text.indexOf(QStringLiteral("]("), i + 1);
-                if (labelEnd > i) {
-                    QString target;
-                    int close = -1;
-                    if (parseTarget(text, labelEnd + 1, &target, &close) && isSafeLinkTarget(target)) {
-                        out += QStringLiteral("<a href=\"%1\">%2</a>")
-                                   .arg(attribute(target.trimmed()), inlineText(text.mid(i + 1, labelEnd - i - 1)));
-                        i = close + 1;
-                        continue;
-                    }
-                }
-            }
-
-            if (text.mid(i, 2) == QStringLiteral("**") || text.mid(i, 2) == QStringLiteral("__")) {
-                const QString marker = text.mid(i, 2);
-                const int end = text.indexOf(marker, i + 2);
-                if (end > i + 2) {
-                    out += QStringLiteral("<b>") + inlineText(text.mid(i + 2, end - i - 2))
-                        + QStringLiteral("</b>");
-                    i = end + 2;
-                    continue;
-                }
-            }
-
-            if (text.mid(i, 2) == QStringLiteral("~~")) {
-                const int end = text.indexOf(QStringLiteral("~~"), i + 2);
-                if (end > i + 2) {
-                    out += QStringLiteral("<s>") + inlineText(text.mid(i + 2, end - i - 2))
-                        + QStringLiteral("</s>");
-                    i = end + 2;
-                    continue;
-                }
-            }
-
-            if ((ch == QLatin1Char('*') || ch == QLatin1Char('_')) && !isEscaped(text, i)) {
-                const bool wordUnderscore = ch == QLatin1Char('_') && i > 0
-                    && text.at(i - 1).isLetterOrNumber();
-                if (!wordUnderscore && i + 1 < text.size() && !text.at(i + 1).isSpace()) {
-                    int end = -1;
-                    for (int p = i + 1; p < text.size(); ++p) {
-                        if (text.at(p) == ch && !isEscaped(text, p)) {
-                            if (ch == QLatin1Char('*') && p + 1 < text.size() && text.at(p + 1) == QLatin1Char('*')) {
-                                ++p;
-                                continue;
-                            }
-                            end = p;
-                            break;
-                        }
-                    }
-                    if (end > i + 1) {
-                        out += QStringLiteral("<i>") + inlineText(text.mid(i + 1, end - i - 1))
-                            + QStringLiteral("</i>");
-                        i = end + 1;
-                        continue;
-                    }
-                }
-            }
-
-            out += escapeHtml(QString(ch));
-            ++i;
-        }
-        return out;
+    QImage measuring(1, 1, QImage::Format_ARGB32_Premultiplied);
+    measuring.fill(Qt::transparent);
+    QPainter measurePainter(&measuring);
+    measurePainter.setRenderHint(QPainter::Antialiasing, true);
+    double width = 0.0;
+    double ascent = 0.0;
+    double descent = 0.0;
+    double strikeout = 0.0;
+    math.getSizeDetail(measurePainter, width, ascent, descent, strikeout);
+    measurePainter.end();
+    if (!(width > 0.0) || !(ascent + descent > 0.0)) {
+        result.error = QStringLiteral("公式尺寸无效");
+        return result;
     }
 
-    bool parseTarget(const QString &text, int openParen, QString *target, int *closeParen) const
-    {
-        if (openParen >= text.size() || text.at(openParen) != QLatin1Char('('))
-            return false;
-        int depth = 1;
-        int p = openParen + 1;
-        while (p < text.size()) {
-            if (text.at(p) == QLatin1Char('('))
-                ++depth;
-            else if (text.at(p) == QLatin1Char(')')) {
-                --depth;
-                if (depth == 0)
-                    break;
-            }
-            ++p;
-        }
-        if (p >= text.size())
-            return false;
-        QString inside = text.mid(openParen + 1, p - openParen - 1).trimmed();
-        if (inside.startsWith(QLatin1Char('<')) && inside.contains(QLatin1Char('>'))) {
-            const int gt = inside.indexOf(QLatin1Char('>'));
-            inside = inside.mid(1, gt - 1);
-        } else {
-            const int ws = inside.indexOf(QRegularExpression(QStringLiteral("\\s")));
-            if (ws > 0)
-                inside = inside.left(ws);
-        }
-        if (inside.isEmpty())
-            return false;
-        *target = inside;
-        *closeParen = p;
-        return true;
-    }
+    const qreal padding = 2.0;
+    const QSizeF logical(width + 2 * padding, ascent + descent + 2 * padding);
+    const qreal scale = 2.0;
+    const int pixelWidth = std::max(1, static_cast<int>(std::ceil(logical.width() * scale)));
+    const int pixelHeight = std::max(1, static_cast<int>(std::ceil(logical.height() * scale)));
+    QImage image(pixelWidth, pixelHeight, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::TextAntialiasing, true);
+    painter.scale(scale, scale);
+    painter.translate(padding, padding);
+    math.draw(painter, 0.0, ascent);
+    painter.end();
+    image.setDevicePixelRatio(1.0);
 
-    QString mathImage(const QString &expression, bool display, qreal maxWidth)
-    {
-        if (expression.trimmed().isEmpty())
-            return QString();
-        QImage image = MathRenderer::render(expression, display, MathRenderer::defaultSupersample());
-        if (image.isNull())
-            return QString();
-
-        const qreal scale = MathRenderer::defaultSupersample();
-        qreal width = image.width() / scale;
-        qreal height = image.height() / scale;
-        if (display && maxWidth > 0 && width > maxWidth) {
-            const qreal factor = maxWidth / width;
-            width = maxWidth;
-            height *= factor;
-        }
-        if (!display && height > 46) {
-            const qreal factor = 46.0 / height;
-            width *= factor;
-            height = 46;
-        }
-
-        const QUrl url(QStringLiteral("pano-math:///%1").arg(m_resourceCounter++));
-        m_resources.insert(url, image);
-        return QStringLiteral("<img src=\"%1\" width=\"%2\" height=\"%3\" align=\"middle\"/>")
-            .arg(url.toString())
-            .arg(qMax(1, qRound(width)))
-            .arg(qMax(1, qRound(height)));
-    }
-
-    QString resolveImagePath(const QString &target) const
-    {
-        const QString t = target.trimmed();
-        if (t.isEmpty() || !isSafeLinkTarget(t))
-            return QString();
-        if (t.startsWith(QStringLiteral("file:"), Qt::CaseInsensitive))
-            return QUrl(t).toLocalFile();
-        if (t.contains(QStringLiteral("://")))
-            return QString();
-        const QFileInfo info(t);
-        if (info.isAbsolute())
-            return info.absoluteFilePath();
-        if (m_baseDirectory.isEmpty())
-            return QString();
-        return QDir(m_baseDirectory).absoluteFilePath(t);
-    }
-
-    QString imageHtml(const QString &alt, const QString &target)
-    {
-        const QString path = resolveImagePath(target);
-        QImage image;
-        if (!path.isEmpty()) {
-            QImageReader reader(path);
-            reader.setAutoTransform(true);
-            image = reader.read();
-        }
-        const QString altText = alt.trimmed().isEmpty() ? QStringLiteral("图片") : alt.trimmed();
-        if (image.isNull()) {
-            m_warnings.append(QStringLiteral("无法加载图片：%1").arg(target));
-            return QStringLiteral("<span>[%1]</span>").arg(escapeHtml(altText));
-        }
-        constexpr int maxWidth = 640;
-        if (image.width() > maxWidth)
-            image = image.scaledToWidth(maxWidth, Qt::SmoothTransformation);
-
-        const QUrl url(QStringLiteral("pano-image:///%1").arg(m_resourceCounter++));
-        m_resources.insert(url, image);
-        return QStringLiteral("<img src=\"%1\" width=\"%2\" height=\"%3\" alt=\"%4\"/>")
-            .arg(url.toString())
-            .arg(image.width())
-            .arg(image.height())
-            .arg(attribute(altText));
-    }
-
-    QString m_markdown;
-    QString m_baseDirectory;
-    QStringList m_warnings;
-    QHash<QUrl, QImage> m_resources;
-    int m_resourceCounter = 0;
-};
+    result.image = image;
+    result.logicalSize = logical;
+    return result;
+}
 
 } // namespace
 
-MarkdownRenderResult MarkdownRenderer::render(const QString &markdown, const QString &baseDirectory)
+MarkdownRenderResult MarkdownRenderer::render(const QString &markdown,
+                                              const QString &baseDirectory,
+                                              qreal fontPt,
+                                              const QColor &textColor)
 {
-    Renderer renderer(markdown, baseDirectory);
-    return renderer.run();
+    MarkdownRenderResult result;
+    int displayFenceCount = 0;
+    for (const QString &line : markdown.split(QLatin1Char('\n'))) {
+        if (line.trimmed() == QStringLiteral("$$"))
+            ++displayFenceCount;
+    }
+    if (displayFenceCount % 2 != 0) {
+        ++result.mathFailures;
+        result.warnings.append(QStringLiteral("存在未闭合的 $$ 显示公式，原始文本已保留"));
+    }
+
+    QByteArray htmlBytes;
+    const QByteArray utf8 = markdown.toUtf8();
+    const unsigned parserFlags = MD_DIALECT_GITHUB | MD_FLAG_LATEXMATHSPANS | MD_FLAG_NOHTML;
+    if (md_html(utf8.constData(), static_cast<MD_SIZE>(utf8.size()), appendHtml, &htmlBytes,
+                parserFlags, 0) != 0) {
+        result.warnings.append(QStringLiteral("MD4C 解析失败"));
+        result.html = QStringLiteral("<p>Markdown 解析失败。</p>");
+        return result;
+    }
+    QString html = QString::fromUtf8(htmlBytes);
+
+    auto mathImageTag = [&](const QString &latex, bool display) {
+        ++result.formulaCount;
+        const QString trimmed = latex.trimmed();
+        const QString key = QString::number(result.formulaCount);
+        const QUrl url(QStringLiteral("pano-math:///") + key);
+        const MathImage rendered = renderMath(decodeHtmlEntities(trimmed), fontPt, textColor);
+        if (!rendered.ok()) {
+            ++result.mathFailures;
+            result.warnings.append(QStringLiteral("公式 %1 失败：%2")
+                                       .arg(result.formulaCount)
+                                       .arg(rendered.error));
+            const QString original = decodeHtmlEntities(trimmed).toHtmlEscaped();
+            return QStringLiteral("<span class=\"math-error\">[公式渲染失败：%1] <code>%2</code></span>")
+                .arg(rendered.error.toHtmlEscaped(), original);
+        }
+        result.resources.insert(url, rendered.image);
+        const qreal maxWidth = display ? 760.0 : 520.0;
+        qreal logicalWidth = rendered.logicalSize.width();
+        qreal logicalHeight = rendered.logicalSize.height();
+        if (logicalWidth > maxWidth) {
+            const qreal factor = maxWidth / logicalWidth;
+            logicalWidth = maxWidth;
+            logicalHeight *= factor;
+            result.warnings.append(QStringLiteral("公式 %1 过宽，已缩放显示")
+                                       .arg(result.formulaCount));
+        }
+        const QString tag = QStringLiteral("<img src=\"%1\" width=\"%2\" height=\"%3\" alt=\"math\">")
+                                .arg(url.toString())
+                                .arg(static_cast<int>(std::ceil(logicalWidth)))
+                                .arg(static_cast<int>(std::ceil(logicalHeight)));
+        if (display)
+            return QStringLiteral("<div align=\"center\">%1</div>").arg(tag);
+        return tag;
+    };
+
+    {
+        static const QRegularExpression displayRe(
+            QStringLiteral("<p>\\s*<x-equation type=\"display\">(.*?)</x-equation>\\s*</p>"),
+            QRegularExpression::DotMatchesEverythingOption);
+        QString replaced;
+        int last = 0;
+        auto it = displayRe.globalMatch(html);
+        while (it.hasNext()) {
+            const auto match = it.next();
+            replaced += html.mid(last, match.capturedStart() - last);
+            replaced += mathImageTag(match.captured(1), true);
+            last = match.capturedEnd();
+        }
+        replaced += html.mid(last);
+        html = replaced;
+    }
+    {
+        static const QRegularExpression inlineRe(
+            QStringLiteral("<x-equation>(.*?)</x-equation>"),
+            QRegularExpression::DotMatchesEverythingOption);
+        QString replaced;
+        int last = 0;
+        auto it = inlineRe.globalMatch(html);
+        while (it.hasNext()) {
+            const auto match = it.next();
+            replaced += html.mid(last, match.capturedStart() - last);
+            replaced += mathImageTag(match.captured(1), false);
+            last = match.capturedEnd();
+        }
+        replaced += html.mid(last);
+        html = replaced;
+    }
+    html.replace(QStringLiteral("<del>"),
+                 QStringLiteral("<span style=\"text-decoration: line-through;\">"));
+    html.replace(QStringLiteral("</del>"), QStringLiteral("</span>"));
+
+    {
+        static const QRegularExpression imageRe(
+            QStringLiteral("<img\\s+([^>]*?)src=\"([^\"]+)\"([^>]*)>"));
+        QString replaced;
+        int last = 0;
+        int imageIndex = 0;
+        auto it = imageRe.globalMatch(html);
+        while (it.hasNext()) {
+            const auto match = it.next();
+            replaced += html.mid(last, match.capturedStart() - last);
+            const QString src = match.captured(2);
+            if (src.startsWith(QStringLiteral("pano-math:///"))) {
+                replaced += match.captured(0);
+            } else if (src.contains(QStringLiteral("://")) || src.startsWith(QLatin1Char('/'))) {
+                ++result.missingImages;
+                result.warnings.append(QStringLiteral("已阻止外部/绝对图片：%1").arg(src));
+                replaced += QStringLiteral("<span class=\"asset-missing\">[图片已阻止：%1]</span>")
+                                .arg(src.toHtmlEscaped());
+            } else {
+                const QString path = QDir(baseDirectory).absoluteFilePath(src);
+                QImageReader reader(path);
+                reader.setAutoTransform(true);
+                const QImage image = reader.read();
+                if (image.isNull()) {
+                    ++result.missingImages;
+                    result.warnings.append(QStringLiteral("图片缺失：%1").arg(path));
+                    replaced += QStringLiteral("<span class=\"asset-missing\">[图片缺失：%1]</span>")
+                                    .arg(src.toHtmlEscaped());
+                } else {
+                    const QUrl url(QStringLiteral("pano-image:///") + QString::number(imageIndex++));
+                    result.resources.insert(url, image);
+                    QString tag = match.captured(0);
+                    tag.replace(QStringLiteral("src=\"%1\"").arg(src),
+                                QStringLiteral("src=\"%1\"").arg(url.toString()));
+                    if (image.width() > 720) {
+                        tag.insert(tag.size() - 1,
+                                   QStringLiteral(" width=\"720\" height=\"%1\"")
+                                       .arg(image.height() * 720 / image.width()));
+                    }
+                    replaced += tag;
+                }
+            }
+            last = match.capturedEnd();
+        }
+        replaced += html.mid(last);
+        html = replaced;
+    }
+
+    result.html = html;
+    return result;
 }
 
 } // namespace pano

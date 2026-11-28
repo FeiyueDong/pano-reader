@@ -22,6 +22,11 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QImageReader>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSaveFile>
+#include <QTextStream>
 #include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
@@ -55,6 +60,7 @@
 #include <QVBoxLayout>
 
 #include "annotation/AnnotationRenderer.h"
+#include "common/TimeUtils.h"
 #include "app/IconManager.h"
 #include "app/NoteEditDialog.h"
 #include "app/RegionCaptureOverlay.h"
@@ -1117,23 +1123,88 @@ QWidget *ReaderWorkspace::buildNoteTab()
     auto *deleteButton = makeButton(QStringLiteral("trash-2"), tr("删除"));
     auto *linkButton = makeButton(QStringLiteral("external-link"), tr("关联/解除关联所选标注"));
     auto *locateButton = makeButton(QStringLiteral("scan"), tr("定位关联页"));
+    auto *exportButton = new QToolButton(page);
+    exportButton->setIcon(IconManager::instance()->icon(QStringLiteral("download"), 18));
+    exportButton->setToolTip(tr("导出笔记"));
+    exportButton->setAutoRaise(true);
+    auto *exportMenu = new QMenu(exportButton);
+    exportMenu->addAction(tr("导出当前笔记为 Markdown…"), this, [this] {
+        const QString nodeId = selectedNoteNodeId();
+        const NoteTreeNode *node = m_session ? m_session->noteTree().findNode(nodeId) : nullptr;
+        if (!node || node->type != NoteNodeType::Note) {
+            showStatus(tr("请先选择一条笔记。"));
+            return;
+        }
+        const Note *note = m_session->note(node->noteId);
+        if (!note)
+            return;
+        const QString path = QFileDialog::getSaveFileName(
+            this, tr("导出 Markdown"), note->displayTitle() + QStringLiteral(".md"),
+            tr("Markdown (*.md)"));
+        if (path.isEmpty())
+            return;
+        QString error;
+        exportNoteMarkdown(note->id, path, &error);
+        if (!error.isEmpty())
+            showStatus(error);
+        else
+            showStatus(tr("已导出笔记：%1").arg(path));
+    });
+    exportMenu->addAction(tr("导出全部笔记为 Markdown 目录…"), this, [this] {
+        const QString dir = QFileDialog::getExistingDirectory(this, tr("导出全部笔记"));
+        if (dir.isEmpty())
+            return;
+        QString error;
+        exportBookMarkdown(dir, &error);
+        showStatus(error.isEmpty() ? tr("已导出全部笔记") : error);
+    });
+    exportMenu->addAction(tr("导出笔记数据为 JSON…"), this, [this] {
+        const QString path = QFileDialog::getSaveFileName(
+            this, tr("导出笔记数据"), QStringLiteral("notes.json"),
+            tr("JSON (*.json)"));
+        if (path.isEmpty())
+            return;
+        QString error;
+        exportBookJson(path, &error);
+        showStatus(error.isEmpty() ? tr("已导出笔记数据") : error);
+    });
+    exportButton->setMenu(exportMenu);
+    exportButton->setPopupMode(QToolButton::InstantPopup);
+    bar->addWidget(exportButton);
     bar->addStretch(1);
     layout->addLayout(bar);
+
+    m_noteFilterEdit = new QLineEdit(page);
+    m_noteFilterEdit->setPlaceholderText(tr("过滤笔记树…"));
+    m_noteFilterEdit->setClearButtonEnabled(true);
+    layout->addWidget(m_noteFilterEdit);
+    connect(m_noteFilterEdit, &QLineEdit::textChanged, this, [this] {
+        applyNoteFilter();
+    });
 
     m_noteTreeWidget = new QTreeWidget(page);
     m_noteTreeWidget->setHeaderHidden(true);
     m_noteTreeWidget->setContextMenuPolicy(Qt::CustomContextMenu);
     m_noteTreeWidget->setMinimumHeight(120);
-    layout->addWidget(m_noteTreeWidget, 1);
 
     m_noteInfoLabel = new QLabel(page);
     m_noteInfoLabel->setWordWrap(true);
+    m_noteInfoLabel->setTextFormat(Qt::RichText);
     m_noteInfoLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_noteInfoLabel->setStyleSheet(
+        QStringLiteral("QLabel { border: 1px solid palette(mid); border-radius: 4px; padding: 6px; }"));
     layout->addWidget(m_noteInfoLabel);
 
     m_notePreview = new MarkdownPreview(page);
     m_notePreview->setMinimumHeight(100);
-    layout->addWidget(m_notePreview, 1);
+
+    auto *noteSplitter = new QSplitter(Qt::Vertical, page);
+    noteSplitter->addWidget(m_noteTreeWidget);
+    noteSplitter->addWidget(m_notePreview);
+    noteSplitter->setSizes({180, 360});
+    noteSplitter->setStretchFactor(0, 1);
+    noteSplitter->setStretchFactor(1, 2);
+    layout->addWidget(noteSplitter, 1);
 
     connect(newNoteButton, &QToolButton::clicked, this, [this] {
         createIndependentNote(selectedParentGroupId());
@@ -1280,8 +1351,8 @@ void ReaderWorkspace::refreshAll()
     refreshThumbnails();
     refreshAnnotationList();
     refreshBookmarks();
-    if (m_searchModel)
-        m_searchModel->setDocument(m_view->hasDocument() ? m_view->document()->pdf() : nullptr);
+    if (m_searchModel && m_view && m_view->hasDocument())
+        m_searchModel->setDocument(m_view->document()->pdf());
     if (m_history.isEmpty() && m_view->hasDocument()) {
         int page = m_view->currentPage();
         const QPointF anchor = m_view->viewportAnchor(&page);
@@ -1728,13 +1799,47 @@ void ReaderWorkspace::refreshNoteTree()
     if (!m_noteTreeWidget)
         return;
     const QString selected = selectedNoteNodeId();
+    QSet<QString> expandedNodes;
+    if (m_noteTreeWidget) {
+        QTreeWidgetItemIterator it(m_noteTreeWidget);
+        while (*it) {
+            if ((*it)->childCount() > 0 && (*it)->isExpanded())
+                expandedNodes.insert((*it)->data(0, Qt::UserRole).toString());
+            ++it;
+        }
+    }
+    const int oldScroll = m_noteTreeWidget ? m_noteTreeWidget->verticalScrollBar()->value() : 0;
     m_noteTreeWidget->clear();
     if (!m_session)
         return;
 
     std::function<void(const QString &, QTreeWidgetItem *)> addChildren =
         [&](const QString &parentId, QTreeWidgetItem *parentItem) {
-            const QStringList childIds = m_session->noteTree().childIds(parentId);
+            QStringList childIds = m_session->noteTree().childIds(parentId);
+            const int sortMode = m_noteSortCombo ? m_noteSortCombo->currentIndex() : 0;
+            if (sortMode == 1) {
+                std::sort(childIds.begin(), childIds.end(), [this](const QString &a, const QString &b) {
+                    const NoteTreeNode *na = m_session->noteTree().findNode(a);
+                    const NoteTreeNode *nb = m_session->noteTree().findNode(b);
+                    const QString ta = na && na->type == NoteNodeType::Note && m_session->note(na->noteId)
+                                           ? m_session->note(na->noteId)->displayTitle()
+                                           : (na ? na->title : QString());
+                    const QString tb = nb && nb->type == NoteNodeType::Note && m_session->note(nb->noteId)
+                                           ? m_session->note(nb->noteId)->displayTitle()
+                                           : (nb ? nb->title : QString());
+                    return QString::localeAwareCompare(ta, tb) < 0;
+                });
+            } else if (sortMode == 2) {
+                std::sort(childIds.begin(), childIds.end(), [this](const QString &a, const QString &b) {
+                    const NoteTreeNode *na = m_session->noteTree().findNode(a);
+                    const NoteTreeNode *nb = m_session->noteTree().findNode(b);
+                    const Note *noteA = na && na->type == NoteNodeType::Note ? m_session->note(na->noteId) : nullptr;
+                    const Note *noteB = nb && nb->type == NoteNodeType::Note ? m_session->note(nb->noteId) : nullptr;
+                    if (noteA && noteB)
+                        return noteA->modifiedAt > noteB->modifiedAt;
+                    return noteA != nullptr;
+                });
+            }
             for (const QString &nodeId : childIds) {
                 const NoteTreeNode *node = m_session->noteTree().findNode(nodeId);
                 if (!node)
@@ -1746,7 +1851,7 @@ void ReaderWorkspace::refreshNoteTree()
                     item->setIcon(0, IconManager::instance()->icon(QStringLiteral("folder"), 18));
                     item->setData(0, Qt::UserRole, node->id);
                     addChildren(node->id, item);
-                    item->setExpanded(true);
+                    item->setExpanded(expandedNodes.isEmpty() || expandedNodes.contains(node->id));
                 } else {
                     const Note *note = m_session->note(node->noteId);
                     if (!note)
@@ -1766,6 +1871,13 @@ void ReaderWorkspace::refreshNoteTree()
             }
         };
     addChildren(QString(), nullptr);
+    if (m_noteTreeWidget->topLevelItemCount() == 0) {
+        auto *empty = new QTreeWidgetItem(m_noteTreeWidget);
+        empty->setText(0, tr("暂无笔记，点击“新建笔记”开始"));
+        empty->setFlags(Qt::NoItemFlags);
+    }
+    applyNoteFilter();
+    m_noteTreeWidget->verticalScrollBar()->setValue(oldScroll);
     if (!selected.isEmpty()) {
         QTreeWidgetItemIterator it(m_noteTreeWidget);
         while (*it) {
@@ -1778,6 +1890,231 @@ void ReaderWorkspace::refreshNoteTree()
     }
 }
 
+namespace {
+
+QString safeExportName(QString name)
+{
+    name = name.trimmed();
+    if (name.isEmpty())
+        name = QStringLiteral("未命名");
+    name.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|\\r\\n]")), QStringLiteral("_"));
+    return name.left(80);
+}
+
+bool copyDirectoryContents(const QString &source, const QString &target, QString *error)
+{
+    QDir sourceDir(source);
+    if (!sourceDir.exists())
+        return true;
+    if (!QDir().mkpath(target)) {
+        if (error) *error = QStringLiteral("无法创建导出目录：%1").arg(target);
+        return false;
+    }
+    const QFileInfoList entries = sourceDir.entryInfoList(
+        QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden);
+    for (const QFileInfo &entry : entries) {
+        const QString destination = QDir(target).filePath(entry.fileName());
+        if (entry.isDir()) {
+            if (!copyDirectoryContents(entry.absoluteFilePath(), destination, error))
+                return false;
+        } else if (!QFile::copy(entry.absoluteFilePath(), destination)) {
+            if (error) *error = QStringLiteral("无法复制附件：%1").arg(entry.fileName());
+            return false;
+        }
+    }
+    return true;
+}
+
+QString rewriteAssetLinks(QString markdown, const QString &prefix)
+{
+    markdown.replace(QRegularExpression(QStringLiteral(R"(\]\(assets/)")),
+                     QStringLiteral("](%1assets/").arg(prefix));
+    return markdown;
+}
+
+} // namespace
+
+void ReaderWorkspace::exportNoteMarkdown(const QString &noteId, const QString &path, QString *error)
+{
+    if (!m_session) {
+        if (error) *error = QStringLiteral("会话不可用。");
+        return;
+    }
+    const Note *note = m_session->note(noteId);
+    if (!note) {
+        if (error) *error = QStringLiteral("笔记不存在。");
+        return;
+    }
+    const QFileInfo targetInfo(path);
+    const QString assetDirName = targetInfo.completeBaseName() + QStringLiteral(".assets");
+    const QString assetDir = QDir(targetInfo.absolutePath()).filePath(assetDirName);
+    QString copyError;
+    if (!copyDirectoryContents(QDir(m_session->bookDirectory()).filePath(QStringLiteral("assets")),
+                               assetDir, &copyError)) {
+        if (error) *error = copyError;
+        return;
+    }
+    QString markdown = note->markdown;
+    markdown = rewriteAssetLinks(markdown, assetDirName + QStringLiteral("/"));
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        if (error) *error = QStringLiteral("无法写入：%1").arg(path);
+        return;
+    }
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    stream << "# " << note->displayTitle() << "\n\n" << markdown;
+    if (!markdown.endsWith(QLatin1Char('\n')))
+        stream << '\n';
+    if (!file.commit() && error)
+        *error = QStringLiteral("写入失败：%1").arg(path);
+}
+
+void ReaderWorkspace::exportBookMarkdown(const QString &directory, QString *error)
+{
+    if (!m_session) {
+        if (error) *error = QStringLiteral("会话不可用。");
+        return;
+    }
+    QDir root(directory);
+    if (!root.exists() && !QDir().mkpath(directory)) {
+        if (error) *error = QStringLiteral("无法创建导出目录。");
+        return;
+    }
+    QString copyError;
+    if (!copyDirectoryContents(QDir(m_session->bookDirectory()).filePath(QStringLiteral("assets")),
+                               root.filePath(QStringLiteral("assets")), &copyError)) {
+        if (error) *error = copyError;
+        return;
+    }
+    int sequence = 0;
+    std::function<void(const QString &, const QDir &, const QString &)> writeGroup =
+        [&](const QString &parentId, const QDir &dir, const QString &assetPrefix) {
+            QStringList childIds = m_session->noteTree().childIds(parentId);
+            const int sortMode = m_noteSortCombo ? m_noteSortCombo->currentIndex() : 0;
+            if (sortMode == 1) {
+                std::sort(childIds.begin(), childIds.end(), [this](const QString &a, const QString &b) {
+                    const NoteTreeNode *na = m_session->noteTree().findNode(a);
+                    const NoteTreeNode *nb = m_session->noteTree().findNode(b);
+                    const QString ta = na && na->type == NoteNodeType::Note && m_session->note(na->noteId)
+                                           ? m_session->note(na->noteId)->displayTitle()
+                                           : (na ? na->title : QString());
+                    const QString tb = nb && nb->type == NoteNodeType::Note && m_session->note(nb->noteId)
+                                           ? m_session->note(nb->noteId)->displayTitle()
+                                           : (nb ? nb->title : QString());
+                    return QString::localeAwareCompare(ta, tb) < 0;
+                });
+            } else if (sortMode == 2) {
+                std::sort(childIds.begin(), childIds.end(), [this](const QString &a, const QString &b) {
+                    const NoteTreeNode *na = m_session->noteTree().findNode(a);
+                    const NoteTreeNode *nb = m_session->noteTree().findNode(b);
+                    const Note *noteA = na && na->type == NoteNodeType::Note ? m_session->note(na->noteId) : nullptr;
+                    const Note *noteB = nb && nb->type == NoteNodeType::Note ? m_session->note(nb->noteId) : nullptr;
+                    if (noteA && noteB)
+                        return noteA->modifiedAt > noteB->modifiedAt;
+                    return noteA != nullptr;
+                });
+            }
+            for (const QString &nodeId : childIds) {
+                const NoteTreeNode *node = m_session->noteTree().findNode(nodeId);
+                if (!node)
+                    continue;
+                if (node->type == NoteNodeType::Group) {
+                    QString name = safeExportName(node->title.isEmpty() ? tr("未命名分组") : node->title);
+                    QString targetName = name;
+                    int suffix = 2;
+                    while (QDir(dir.filePath(targetName)).exists())
+                        targetName = QStringLiteral("%1-%2").arg(name).arg(suffix++);
+                    if (!dir.mkpath(targetName)) {
+                        if (error) *error = QStringLiteral("无法创建分组目录：%1").arg(targetName);
+                        return;
+                    }
+                    writeGroup(node->id, QDir(dir.filePath(targetName)), assetPrefix + QStringLiteral("../"));
+                } else {
+                    const Note *note = m_session->note(node->noteId);
+                    if (!note)
+                        continue;
+                    ++sequence;
+                    const QString name = QStringLiteral("%1-%2.md")
+                                             .arg(sequence, 2, 10, QLatin1Char('0'))
+                                             .arg(safeExportName(note->displayTitle()));
+                    QSaveFile file(dir.filePath(name));
+                    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                        if (error) *error = QStringLiteral("无法写入：%1").arg(name);
+                        return;
+                    }
+                    QTextStream stream(&file);
+                    stream.setEncoding(QStringConverter::Utf8);
+                    stream << "# " << note->displayTitle() << "\n\n"
+                           << rewriteAssetLinks(note->markdown, assetPrefix);
+                    if (!note->markdown.endsWith(QLatin1Char('\n')))
+                        stream << '\n';
+                    if (!file.commit()) {
+                        if (error) *error = QStringLiteral("写入失败：%1").arg(name);
+                        return;
+                    }
+                }
+            }
+        };
+    writeGroup(QString(), root, QString());
+}
+
+void ReaderWorkspace::exportBookJson(const QString &path, QString *error)
+{
+    if (!m_session) {
+        if (error) *error = QStringLiteral("会话不可用。");
+        return;
+    }
+    QJsonArray notes;
+    for (const Note &note : m_session->notes()->notes())
+        notes.append(note.toJson());
+    QJsonObject root{
+        {QStringLiteral("format"), QStringLiteral("pano-notes-export")},
+        {QStringLiteral("schema_version"), 1},
+        {QStringLiteral("book_id"), m_session->bookId()},
+        {QStringLiteral("title"), m_session->title()},
+        {QStringLiteral("exported_at"), nowIsoUtc()},
+        {QStringLiteral("notes"), notes},
+        {QStringLiteral("note_tree"), m_session->noteTree().toJson()},
+    };
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        if (error) *error = QStringLiteral("无法写入：%1").arg(path);
+        return;
+    }
+    file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    if (!file.commit() && error)
+        *error = QStringLiteral("写入失败：%1").arg(path);
+}
+
+void ReaderWorkspace::applyNoteFilter()
+{
+    if (!m_noteTreeWidget)
+        return;
+    const QString filter = m_noteFilterEdit ? m_noteFilterEdit->text().trimmed() : QString();
+    std::function<bool(QTreeWidgetItem *)> apply = [&](QTreeWidgetItem *item) -> bool {
+        bool visible = filter.isEmpty();
+        const QString nodeId = item->data(0, Qt::UserRole).toString();
+        const NoteTreeNode *node = m_session ? m_session->noteTree().findNode(nodeId) : nullptr;
+        if (!visible && node) {
+            if (node->type == NoteNodeType::Group) {
+                visible = node->title.contains(filter, Qt::CaseInsensitive);
+            } else if (const Note *note = m_session->note(node->noteId)) {
+                visible = note->displayTitle().contains(filter, Qt::CaseInsensitive)
+                          || note->markdown.contains(filter, Qt::CaseInsensitive);
+            }
+        }
+        for (int i = 0; i < item->childCount(); ++i) {
+            if (apply(item->child(i)))
+                visible = true;
+        }
+        item->setHidden(!visible);
+        return visible;
+    };
+    for (int i = 0; i < m_noteTreeWidget->topLevelItemCount(); ++i)
+        apply(m_noteTreeWidget->topLevelItem(i));
+}
+
 void ReaderWorkspace::updateNotePreview()
 {
     if (!m_notePreview || !m_noteInfoLabel || !m_session)
@@ -1788,7 +2125,11 @@ void ReaderWorkspace::updateNotePreview()
         if (const NoteTreeNode *node = m_session->noteTree().findNode(nodeId))
             note = m_session->note(node->noteId);
         if (!note && m_session->noteTree().isGroup(nodeId)) {
-            m_noteInfoLabel->setText(tr("分组：%1").arg(m_session->noteTree().findNode(nodeId)->title));
+            const NoteTreeNode *group = m_session->noteTree().findNode(nodeId);
+            m_noteInfoLabel->setText(
+                tr("<b>%1</b><br><span style=\"color:palette(mid);\">分组 · %2 个子节点</span>")
+                    .arg(group->title.toHtmlEscaped())
+                    .arg(m_session->noteTree().childIds(nodeId).size()));
             m_notePreview->setNoteMarkdown(QString(), m_session->bookDirectory());
             return;
         }
@@ -1805,9 +2146,16 @@ void ReaderWorkspace::updateNotePreview()
     const Annotation *annotation = note->annotationId.isEmpty()
                                        ? nullptr
                                        : m_session->view()->annotations()->find(note->annotationId);
-    m_noteInfoLabel->setText(annotation
-        ? tr("%1 · 关联第 %2 页").arg(note->displayTitle()).arg(annotation->pageIndex + 1)
-        : tr("%1 · 独立笔记").arg(note->displayTitle()));
+    const QString linkText = annotation
+        ? tr("关联：%1 · 第 %2 页")
+              .arg(annotationTypeDisplayName(annotation->type))
+              .arg(annotation->pageIndex + 1)
+        : tr("独立笔记（未关联标注）");
+    m_noteInfoLabel->setText(
+        tr("<b>%1</b><br><span style=\"color:palette(mid);\">%2</span>"
+           "<br><span style=\"color:palette(mid);\">创建 %3 · 修改 %4</span>")
+            .arg(note->displayTitle().toHtmlEscaped(), linkText.toHtmlEscaped(),
+                 note->createdAt.toHtmlEscaped(), note->modifiedAt.toHtmlEscaped()));
     m_notePreview->setNoteMarkdown(note->markdown, m_session->bookDirectory());
 }
 
@@ -1842,6 +2190,8 @@ void ReaderWorkspace::openNoteEditor(const QString &noteId)
     }
     if (!m_noteDialog) {
         m_noteDialog = new NoteEditDialog(m_session, this);
+        connect(m_noteDialog, &NoteEditDialog::imageRequested, this, &ReaderWorkspace::insertImageIntoNote);
+        connect(m_noteDialog, &NoteEditDialog::captureRequested, this, &ReaderWorkspace::startRegionCapture);
         connect(m_noteDialog, &NoteEditDialog::saved, this, [this](const QString &id) {
             refreshReadingData();
             if (m_rightTabs)
@@ -1880,7 +2230,11 @@ void ReaderWorkspace::openNoteForAnnotation(const QString &annotationId)
     }
     if (!m_noteDialog) {
         m_noteDialog = new NoteEditDialog(m_session, this);
+        connect(m_noteDialog, &NoteEditDialog::imageRequested, this, &ReaderWorkspace::insertImageIntoNote);
+        connect(m_noteDialog, &NoteEditDialog::captureRequested, this, &ReaderWorkspace::startRegionCapture);
         connect(m_noteDialog, &NoteEditDialog::saved, this, [this](const QString &) {
+            m_pendingNoteAnnotationId.clear();
+            m_pendingNoteAnnotationIsNew = false;
             refreshReadingData();
         });
         connect(m_noteDialog, &NoteEditDialog::closed, this, [this] {
@@ -1911,6 +2265,8 @@ void ReaderWorkspace::createIndependentNote(const QString &parentGroupId)
     }
     if (!m_noteDialog) {
         m_noteDialog = new NoteEditDialog(m_session, this);
+        connect(m_noteDialog, &NoteEditDialog::imageRequested, this, &ReaderWorkspace::insertImageIntoNote);
+        connect(m_noteDialog, &NoteEditDialog::captureRequested, this, &ReaderWorkspace::startRegionCapture);
         connect(m_noteDialog, &NoteEditDialog::saved, this, [this](const QString &) {
             refreshReadingData();
             if (m_rightTabs)
@@ -2084,6 +2440,11 @@ void ReaderWorkspace::showNoteContextMenu(const QPoint &pos)
     QAction *rename = menu.addAction(tr("重命名"));
     QAction *move = menu.addAction(tr("移动到…"));
     QAction *remove = menu.addAction(tr("删除"));
+    if (!item || item->data(0, Qt::UserRole).toString().isEmpty()) {
+        rename->setEnabled(false);
+        move->setEnabled(false);
+        remove->setEnabled(false);
+    }
     QAction *chosen = menu.exec(m_noteTreeWidget->viewport()->mapToGlobal(pos));
     if (chosen == newNote)
         createIndependentNote(selectedParentGroupId());
@@ -2164,6 +2525,8 @@ void ReaderWorkspace::onToolChanged(PdfView::Tool tool)
     updateFloatingToolBars();
     flushPendingStyle();
     updateToolActions();
+    if (tool != PdfView::Tool::Select && m_view && !m_view->selectedAnnotationId().isEmpty())
+        m_view->selectAnnotation(QString());
     if (tool == PdfView::Tool::Select) {
         updateContextToolBar();
         return;
@@ -3157,9 +3520,28 @@ void ReaderWorkspace::onAboutToNavigate(int fromPage, const QPointF &fromPoint,
         || navReason == PdfView::NavigationReason::Internal
         || navReason == PdfView::NavigationReason::Programmatic)
         return;
-    m_pendingHistoryStart = {fromPage, fromPoint};
+    m_pendingHistoryStart = {fromPage, fromPoint, QStringLiteral("当前位置")};
     m_pendingHistoryValid = true;
 }
+
+namespace {
+QString navigationReasonLabel(PdfView::NavigationReason reason)
+{
+    switch (reason) {
+    case PdfView::NavigationReason::PageInput: return QStringLiteral("页码跳转");
+    case PdfView::NavigationReason::Outline: return QStringLiteral("目录跳转");
+    case PdfView::NavigationReason::Thumbnail: return QStringLiteral("缩略图跳转");
+    case PdfView::NavigationReason::Search: return QStringLiteral("搜索结果");
+    case PdfView::NavigationReason::Bookmark: return QStringLiteral("书签");
+    case PdfView::NavigationReason::Annotation: return QStringLiteral("批注定位");
+    case PdfView::NavigationReason::History: return QStringLiteral("历史导航");
+    case PdfView::NavigationReason::Restore: return QStringLiteral("恢复阅读位置");
+    case PdfView::NavigationReason::Internal: return QStringLiteral("内部调整");
+    case PdfView::NavigationReason::Programmatic: return QStringLiteral("程序跳转");
+    }
+    return QStringLiteral("跳转");
+}
+} // namespace
 
 void ReaderWorkspace::onNavigated(int pageIndex, const QPointF &pagePoint, int reason)
 {
@@ -3172,7 +3554,8 @@ void ReaderWorkspace::onNavigated(int pageIndex, const QPointF &pagePoint, int r
         return;
     }
 
-    const NavPoint target{pageIndex, pagePoint};
+    NavPoint target{pageIndex, pagePoint};
+    target.label = navigationReasonLabel(navReason);
     if (m_pendingHistoryValid) {
         if (m_historyIndex < 0) {
             m_history.append(m_pendingHistoryStart);
@@ -3233,7 +3616,7 @@ void ReaderWorkspace::clearNavigationHistory()
     if (m_view && m_view->hasDocument()) {
         int page = m_view->currentPage();
         const QPointF point = m_view->viewportAnchor(&page);
-        m_history.append({page, point});
+        m_history.append({page, point, QStringLiteral("当前位置")});
         m_historyIndex = 0;
     }
     updateHistoryActions();
@@ -3241,10 +3624,25 @@ void ReaderWorkspace::clearNavigationHistory()
 
 void ReaderWorkspace::updateHistoryActions()
 {
-    if (m_backAction)
+    if (m_backAction) {
         m_backAction->setEnabled(m_historyIndex > 0);
-    if (m_forwardAction)
-        m_forwardAction->setEnabled(m_historyIndex >= 0 && m_historyIndex + 1 < m_history.size());
+        if (m_historyIndex > 0) {
+            const NavPoint &p = m_history.at(m_historyIndex - 1);
+            m_backAction->setToolTip(QStringLiteral("返回：%1 · 第 %2 页").arg(p.label).arg(p.page + 1));
+        } else {
+            m_backAction->setToolTip(QStringLiteral("导航后退"));
+        }
+    }
+    if (m_forwardAction) {
+        const bool canForward = m_historyIndex >= 0 && m_historyIndex + 1 < m_history.size();
+        m_forwardAction->setEnabled(canForward);
+        if (canForward) {
+            const NavPoint &p = m_history.at(m_historyIndex + 1);
+            m_forwardAction->setToolTip(QStringLiteral("前进：%1 · 第 %2 页").arg(p.label).arg(p.page + 1));
+        } else {
+            m_forwardAction->setToolTip(QStringLiteral("导航前进"));
+        }
+    }
 }
 
 void ReaderWorkspace::onLayoutModeChanged(PageLayoutMode mode)
